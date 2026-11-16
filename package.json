@@ -1,11 +1,17 @@
 {
   "name": "bot-banque",
-  "version": "2.0.0",
+  "version": "1.0.0",
+  "description": "Bot Discord complet : Gestion de comptes, Auto-Quetes Orbs (Canvas), Gestion Vocale & Tracker Vocal",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "@napi-rs/canvas": "^0.1.60",
-    "dejavu-fonts-ttf": "^2.37.3",
-    "discord.js": "^14.16.0"
+    "discord.js": "^14.16.3",
+    "@napi-rs/canvas": "^0.1.65",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   }
 }
