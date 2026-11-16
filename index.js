@@ -2,7 +2,7 @@ const {
   Client, GatewayIntentBits, Events, SlashCommandBuilder,
   EmbedBuilder, PermissionFlagsBits, MessageFlags,
 } = require('discord.js');
-const Database = require('better-sqlite3');
+const { DatabaseSync } = require('node:sqlite');
 
 // ---------- Config ----------
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -19,8 +19,8 @@ const MIN_BET = 10;
 const RED = new Set([1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]);
 
 // ---------- Base de données ----------
-const db = new Database(process.env.DB_PATH || 'bank.db');
-db.pragma('journal_mode = WAL');
+const db = new DatabaseSync(process.env.DB_PATH || 'bank.db');
+db.exec('PRAGMA journal_mode = WAL');
 db.exec(`CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   wallet INTEGER NOT NULL DEFAULT ${START_MONEY},
@@ -163,10 +163,15 @@ const handlers = {
     const u = getUser(i.user.id);
     if (m > u.wallet) return fail(i, `Tu n'as que ${fmt(u.wallet)} dans ton portefeuille.`);
     getUser(target.id);
-    db.transaction(() => {
+    db.exec('BEGIN');
+    try {
       db.prepare('UPDATE users SET wallet = wallet - ? WHERE id = ?').run(m, i.user.id);
       db.prepare('UPDATE users SET wallet = wallet + ? WHERE id = ?').run(m, target.id);
-    })();
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
     return i.reply({ embeds: [embed('💸 Virement', `${i.user} a envoyé **${fmt(m)}** à ${target}.`, 0x57f287)] });
   },
 
@@ -285,4 +290,3 @@ client.on(Events.InteractionCreate, async (i) => {
 process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
 
 client.login(TOKEN);
-        
