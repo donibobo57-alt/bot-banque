@@ -106,7 +106,7 @@ const handlers = {
     if (target.bot) return fail(i, 'Les bots n\'ont pas de compte.');
     const u = getUser(target.id);
     return i.reply({
-      embeds: [embed(`💰 Compte de ${target.username}`, '')
+      embeds: [embed(`💰 Compte de ${target.username}`, 'Voici ses finances :')
         .addFields(
           { name: 'Portefeuille', value: fmt(u.wallet), inline: true },
           { name: 'Banque', value: fmt(u.bank), inline: true },
