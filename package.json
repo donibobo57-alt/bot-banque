@@ -1,7 +1,6 @@
 {
-  "name": "bot-banque",
+  "name": "bot-discord",
   "version": "1.0.0",
-  "description": "Bot Discord complet : Gestion de comptes, Auto-Quetes Orbs (Canvas), Gestion Vocale & Tracker Vocal",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
