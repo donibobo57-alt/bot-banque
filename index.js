@@ -8,9 +8,6 @@ const { createCanvas } = require('@napi-rs/canvas');
 const { DatabaseSync } = require('node:sqlite');
 const WebSocket = require('ws');
 
-// ======================================================================
-// CONFIGURATION
-// ======================================================================
 const TOKEN = process.env.DISCORD_TOKEN;
 const YOUTUBE_URL = process.env.YOUTUBE_URL || 'https://youtube.com/@TonChaineYouTube';
 
@@ -51,9 +48,6 @@ const STATUS_ICONS = {
   claimed: '✅',
 };
 
-// ======================================================================
-// BASE DE DONNÉES SQLITE (PROPRE & SÉCURISÉE)
-// ======================================================================
 const db = new DatabaseSync(process.env.DB_PATH || 'bot_data.db');
 db.exec('PRAGMA journal_mode = WAL');
 db.exec(`
@@ -64,13 +58,6 @@ db.exec(`
     username TEXT,
     added_at INTEGER NOT NULL,
     PRIMARY KEY (owner_id, token)
-  );
-  CREATE TABLE IF NOT EXISTS saved_entities (
-    owner_id TEXT NOT NULL,
-    category TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    PRIMARY KEY (owner_id, category, entity_id)
   );
 `);
 
@@ -90,33 +77,12 @@ function removeOwnerToken(ownerId, token) {
 function clearOwnerTokens(ownerId) {
   db.prepare('DELETE FROM user_tokens WHERE owner_id = ?').run(ownerId);
 }
-function saveEntity(ownerId, category, entityId, name) {
-  db.prepare(`
-    INSERT INTO saved_entities (owner_id, category, entity_id, name)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(owner_id, category, entity_id) DO UPDATE SET name = excluded.name
-  `).run(ownerId, category, entityId, name);
-}
-function getEntities(ownerId, category) {
-  return db.prepare('SELECT * FROM saved_entities WHERE owner_id = ? AND category = ?').all(ownerId, category);
-}
 
-// ======================================================================
-// ÉTATS ACTIFS EN MÉMOIRE (VOCAL, TRACKER, AUTO-QUÊTES)
-// ======================================================================
-const activeVoiceSessions = new Map();   // ownerId -> Map<token, VoiceSession>
-const activeTrackers = new Map();        // ownerId -> TrackerSession
-const activeQuestBatches = new Map();    // ownerId -> QuestBatch
+const activeVoiceSessions = new Map(); // ownerId -> Map<token, VoiceGatewaySession>
+const activeQuestBatches = new Map();  // ownerId -> QuestBatch
 
-// ======================================================================
-// HELPERS DISCORD API & UTILITAIRES
-// ======================================================================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randFloat = (min, max) => Math.random() * (max - min) + min;
-const parseDiscordId = (str) => {
-  const m = String(str || '').trim().match(/\d{17,20}/);
-  return m ? m[0] : String(str || '').trim();
-};
 
 function userHeaders(token, fullClient = false) {
   const h = {
@@ -139,7 +105,7 @@ async function discordApi(token, method, path, body = null, apiBase = API_V9, fu
     let data = {};
     try { data = await res.json(); } catch {}
     if (res.status === 429) {
-      const wait = (data?.retry_after ? Number(data.retry_after) * 1000 : 5000);
+      const wait = data?.retry_after ? Number(data.retry_after) * 1000 : 5000;
       await sleep(Math.min(wait, 15000));
     }
     return { status: res.status, data };
@@ -151,7 +117,7 @@ async function discordApi(token, method, path, body = null, apiBase = API_V9, fu
 async function verifyToken(token) {
   const { status, data } = await discordApi(token, 'GET', '/users/@me', null, API_V10, false);
   if (status === 200 && data?.id) {
-    return { valid: true, id: data.id, username: data.username || 'Inconnu', globalName: data.global_name || data.username };
+    return { valid: true, id: data.id, username: data.username || 'Inconnu' };
   }
   return { valid: false };
 }
@@ -176,14 +142,6 @@ async function fetchGuildChannels(token, guildId) {
   return status === 200 && Array.isArray(data) ? data : [];
 }
 
-async function fetchGuildName(token, guildId) {
-  const { status, data } = await discordApi(token, 'GET', `/guilds/${guildId}`, null, API_V10, false);
-  return status === 200 && data?.name ? data.name : `Serveur_${guildId.slice(0, 6)}`;
-}
-
-// ======================================================================
-// IMAGE CANVAS : SOLDE D'ORBS (DÉGRADÉ VIOLET / BLEU)
-// ======================================================================
 function generateOrbsBalanceImage(accountsData) {
   const rowHeight = 62;
   const headerH = 210;
@@ -195,17 +153,15 @@ function generateOrbsBalanceImage(accountsData) {
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  // Dégradé principal Violet -> Bleu profond
   const bg = ctx.createLinearGradient(0, 0, W, H);
-  bg.addColorStop(0, '#4c1d95');   // Violet profond
-  bg.addColorStop(0.5, '#3b82f6'); // Bleu électrique
-  bg.addColorStop(1, '#1e1b4b');   // Indigo nuit
+  bg.addColorStop(0, '#4c1d95');
+  bg.addColorStop(0.5, '#3b82f6');
+  bg.addColorStop(1, '#1e1b4b');
   ctx.fillStyle = bg;
   ctx.beginPath();
   ctx.roundRect(0, 0, W, H, 32);
   ctx.fill();
 
-  // Halos lumineux décoratifs
   ctx.save();
   ctx.beginPath();
   ctx.roundRect(0, 0, W, H, 32);
@@ -227,17 +183,14 @@ function generateOrbsBalanceImage(accountsData) {
   ctx.fillRect(0, 0, W, H);
   ctx.restore();
 
-  // Bordure subtile
   ctx.lineWidth = 4;
   ctx.strokeStyle = 'rgba(196, 181, 253, 0.45)';
   ctx.beginPath();
   ctx.roundRect(2, 2, W - 4, H - 4, 30);
   ctx.stroke();
 
-  // Calcul du solde total
   const totalOrbs = accountsData.reduce((acc, a) => acc + (a.orbs || 0), 0);
 
-  // En-tête
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ddd6fe';
   ctx.font = 'bold 22px sans-serif';
@@ -254,7 +207,6 @@ function generateOrbsBalanceImage(accountsData) {
   ctx.font = '600 20px sans-serif';
   ctx.fillText(`Détail par compte (${accountsData.length} actif${accountsData.length > 1 ? 's' : ''})`, W / 2, 178);
 
-  // Liste des comptes
   let y = headerH;
   for (const acc of accountsData) {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
@@ -276,18 +228,14 @@ function generateOrbsBalanceImage(accountsData) {
     y += rowHeight;
   }
 
-  // Pied de page
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
   ctx.font = '600 17px sans-serif';
-  ctx.fillText('Kiozi Self-Panel • Système Orbs & Quêtes Automatiques', W / 2, H - 25);
+  ctx.fillText('Kiozi créateur • Système Orbs & Quêtes', W / 2, H - 25);
 
   return canvas.encode('png');
 }
 
-// ======================================================================
-// MOTEUR 1 : AUTO-QUÊTES ORBS (TEMPS RÉEL + STOP BOUTON ROUGE)
-// ======================================================================
 function parseQuest(q) {
   const cfg = q.config || {};
   const tcfg = cfg.task_config_v2 || cfg.taskConfigV2 || cfg.task_config || {};
@@ -519,9 +467,6 @@ function buildQuestDashboardEmbed(batch) {
     .setTimestamp();
 }
 
-// ======================================================================
-// MOTEUR 2 : GESTION VOCALE (GATEWAY MULTI-COMPTES, MUTE, DEAF, LEAVE)
-// ======================================================================
 class VoiceGatewaySession {
   constructor(token, username, guildId, channelId) {
     this.token = token;
@@ -588,4 +533,85 @@ class VoiceGatewaySession {
         op: 4,
         d: {
           guild_id: this.guildId,
-          channel_id
+          channel_id: this.channelId,
+          self_mute: this.selfMute,
+          self_deaf: this.selfDeaf,
+        },
+      }));
+    }
+  }
+
+  stop() {
+    this.stopped = true;
+    clearInterval(this.hbTimer);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({
+          op: 4,
+          d: { guild_id: this.guildId, channel_id: null, self_mute: false, self_deaf: false },
+        }));
+        this.ws.close();
+      } catch {}
+    }
+  }
+}
+
+async function connectTokensToVoice(ownerId, tokens, guildId, channelId) {
+  let map = activeVoiceSessions.get(ownerId);
+  if (!map) {
+    map = new Map();
+    activeVoiceSessions.set(ownerId, map);
+  }
+  const savedRows = getOwnerTokens(ownerId);
+  const nameByToken = new Map(savedRows.map((r) => [r.token, r.username || 'Compte']));
+
+  for (const t of tokens) {
+    if (map.has(t)) map.get(t).stop();
+    const sess = new VoiceGatewaySession(t, nameByToken.get(t) || 'Compte', guildId, channelId);
+    sess.start();
+    map.set(t, sess);
+  }
+}
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
+
+client.once(Events.ClientReady, async (c) => {
+  console.log(`✅ Bot connecté en tant que ${c.user.tag}`);
+
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('panel')
+      .setDescription('Ouvre le panneau de contrôle (Comptes, Orbs, Auto-Quêtes, Vocal)'),
+    new SlashCommandBuilder()
+      .setName('help')
+      .setDescription('Affiche le tutoriel complet (Bluecord, PhantomMail, Clone Hub, Vocal & Quêtes)'),
+  ];
+
+  await c.application.commands.set(commands);
+  console.log('✅ Commandes /panel et /help enregistrées !');
+});
+
+function buildMainPanel(ownerId) {
+  const tokens = getOwnerTokens(ownerId);
+  const voiceCount = activeVoiceSessions.get(ownerId)?.size || 0;
+  const questBatch = activeQuestBatches.get(ownerId);
+  const questsRunning = questBatch && !questBatch.finished && !questBatch.stopped;
+
+  const emb = new EmbedBuilder()
+    .setTitle('🎛️ Panneau de Contrôle')
+    .setDescription(
+      'Sélectionne un module ci-dessous pour gérer tes comptes, ton solde **Discord Orbs**, tes **auto-quêtes** ou ta **gestion vocale**.'
+    )
+    .setColor(0x5865f2)
+    .addFields(
+      { name: '🔑 Comptes', value: `**${tokens.length}**`, inline: true },
+      { name: '🔊 Vocal actif', value: `**${voiceCount}**`, inline: true },
+      { name: '🎁 Auto-Quêtes', value: questsRunning ? '🟢 En cours' : '⚪ Inactif', inline: true },
+    )
+    .setFooter({ text: 'Kiozi créateur' });
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('nav:tokens').setLabel('Gestion des comptes').setEmoji('🔑').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('nav:orbs_bal').setLabel('Solde Orbs').setEmoji('🔮').setS
