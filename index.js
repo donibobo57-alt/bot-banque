@@ -10,7 +10,6 @@ const WebSocket = require('ws');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const YOUTUBE_URL = process.env.YOUTUBE_URL || 'https://youtube.com/@TonChaineYouTube';
-
 if (!TOKEN) {
   console.error('❌ Variable DISCORD_TOKEN manquante');
   process.exit(1);
@@ -39,13 +38,7 @@ const TASK_LABELS = {
   PLAY_ACTIVITY: 'Activité',
 };
 const STATUS_ICONS = {
-  wait: '⏳',
-  enroll: '📝',
-  run: '▶️',
-  done: '🎁',
-  fail: '❌',
-  skip: '🛑',
-  claimed: '✅',
+  wait: '⏳', enroll: '📝', run: '▶️', done: '🎁', fail: '❌', skip: '🛑', claimed: '✅',
 };
 
 const db = new DatabaseSync(process.env.DB_PATH || 'bot_data.db');
@@ -61,9 +54,9 @@ db.exec(`
   );
 `);
 
-function getOwnerTokens(ownerId) {
-  return db.prepare('SELECT * FROM user_tokens WHERE owner_id = ? ORDER BY added_at ASC').all(ownerId);
-}
+const getOwnerTokens = (ownerId) =>
+  db.prepare('SELECT * FROM user_tokens WHERE owner_id = ? ORDER BY added_at ASC').all(ownerId);
+
 function addOwnerToken(ownerId, token, accountId = null, username = 'Inconnu') {
   db.prepare(`
     INSERT INTO user_tokens (owner_id, token, account_id, username, added_at)
@@ -71,15 +64,15 @@ function addOwnerToken(ownerId, token, accountId = null, username = 'Inconnu') {
     ON CONFLICT(owner_id, token) DO UPDATE SET account_id = excluded.account_id, username = excluded.username
   `).run(ownerId, token.trim(), accountId, username, Date.now());
 }
-function removeOwnerToken(ownerId, token) {
-  db.prepare('DELETE FROM user_tokens WHERE owner_id = ? AND token = ?').run(ownerId, token);
-}
-function clearOwnerTokens(ownerId) {
-  db.prepare('DELETE FROM user_tokens WHERE owner_id = ?').run(ownerId);
-}
 
-const activeVoiceSessions = new Map(); // ownerId -> Map<token, VoiceGatewaySession>
-const activeQuestBatches = new Map();  // ownerId -> QuestBatch
+const removeOwnerToken = (ownerId, token) =>
+  db.prepare('DELETE FROM user_tokens WHERE owner_id = ? AND token = ?').run(ownerId, token);
+
+const clearOwnerTokens = (ownerId) =>
+  db.prepare('DELETE FROM user_tokens WHERE owner_id = ?').run(ownerId);
+
+const activeVoiceSessions = new Map();
+const activeQuestBatches = new Map();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randFloat = (min, max) => Math.random() * (max - min) + min;
@@ -132,16 +125,19 @@ async function getOrbsBalance(token) {
   return null;
 }
 
-async function fetchUserGuilds(token) {
+const fetchUserGuilds = async (token) => {
   const { status, data } = await discordApi(token, 'GET', '/users/@me/guilds', null, API_V10, false);
   return status === 200 && Array.isArray(data) ? data : [];
-}
+};
 
-async function fetchGuildChannels(token, guildId) {
+const fetchGuildChannels = async (token, guildId) => {
   const { status, data } = await discordApi(token, 'GET', `/guilds/${guildId}/channels`, null, API_V10, false);
   return status === 200 && Array.isArray(data) ? data : [];
-}
+};
 
+// ======================================================================
+// Génération d'image : Solde Discord Orbs (conservée intacte)
+// ======================================================================
 function generateOrbsBalanceImage(accountsData) {
   const rowHeight = 62;
   const headerH = 210;
@@ -244,7 +240,6 @@ function parseQuest(q) {
   const task = QUEST_TASKS.find((k) => k in tasks) || null;
   const info = task ? tasks[task] : {};
   const apps = info.applications || [{}];
-  const progressVal = st.progress?.[task]?.value ?? 0;
   const expiresAt = cfg.expires_at ? Date.parse(cfg.expires_at) : Infinity;
 
   return {
@@ -254,7 +249,7 @@ function parseQuest(q) {
     target: Number(info.target || 0),
     appId: apps[0]?.id || null,
     enrolledAt: st.enrolled_at || null,
-    value: Number(progressVal),
+    value: Number(st.progress?.[task]?.value ?? 0),
     done: Boolean(st.completed_at),
     claimed: Boolean(st.claimed_at),
     expired: expiresAt < Date.now(),
@@ -281,16 +276,11 @@ async function claimQuestReward(token, quest) {
 async function runVideoQuest(token, job, signal) {
   const enrolledMs = job.enrolledAt ? Date.parse(job.enrolledAt) : Date.now();
   while (job.value < job.target && !signal.aborted) {
-    const elapsedSec = (Date.now() - enrolledMs) / 1000;
-    if (elapsedSec + 10 - job.value >= 7) {
+    if ((Date.now() - enrolledMs) / 1000 + 10 - job.value >= 7) {
       job.value = Math.min(job.target, job.value + randFloat(7.0, 9.5));
       const { status, data } = await discordApi(
-        token,
-        'POST',
-        `/quests/${job.id}/video-progress`,
-        { timestamp: Number(job.value.toFixed(6)) },
-        API_V9,
-        true
+        token, 'POST', `/quests/${job.id}/video-progress`,
+        { timestamp: Number(job.value.toFixed(6)) }, API_V9, true
       );
       if (status === 200 && data?.completed_at) return true;
       await sleep(randFloat(7000, 9500));
@@ -306,15 +296,10 @@ async function runVideoQuest(token, job, signal) {
 async function runHeartbeatQuest(token, job, baseBody, signal) {
   let fails = 0;
   let stalls = 0;
-
   while (job.value < job.target && !signal.aborted) {
     const { status, data } = await discordApi(
-      token,
-      'POST',
-      `/quests/${job.id}/heartbeat`,
-      { ...baseBody, terminated: false },
-      API_V9,
-      true
+      token, 'POST', `/quests/${job.id}/heartbeat`,
+      { ...baseBody, terminated: false }, API_V9, true
     );
     if (status !== 200) {
       fails += 1;
@@ -332,20 +317,10 @@ async function runHeartbeatQuest(token, job, baseBody, signal) {
         return false;
       }
     }
-    for (let i = 0; i < 60 && !signal.aborted; i++) {
-      await sleep(1000);
-    }
+    for (let i = 0; i < 60 && !signal.aborted; i++) await sleep(1000);
   }
-
   if (signal.aborted) return false;
-  await discordApi(
-    token,
-    'POST',
-    `/quests/${job.id}/heartbeat`,
-    { ...baseBody, terminated: true },
-    API_V9,
-    true
-  );
+  await discordApi(token, 'POST', `/quests/${job.id}/heartbeat`, { ...baseBody, terminated: true }, API_V9, true);
   return true;
 }
 
@@ -364,49 +339,27 @@ async function executeQuestJob(job, signal, logs) {
       }
       job.enrolledAt = data?.enrolled_at || new Date().toISOString();
     }
-
-    if (signal.aborted) {
-      job.status = 'skip';
-      job.note = 'Arrêtée';
-      return;
-    }
+    if (signal.aborted) { job.status = 'skip'; job.note = 'Arrêtée'; return; }
 
     job.status = 'run';
     let success = false;
-
     if (job.task.startsWith('WATCH')) {
       success = await runVideoQuest(token, job, signal);
     } else if (job.task === 'PLAY_ACTIVITY') {
       const { status, data } = await discordApi(token, 'GET', '/users/@me/channels', null, API_V9, true);
       const dm = status === 200 && Array.isArray(data) ? data.find((c) => c.type === 1 || c.type === 3) : null;
-      if (!dm || !job.appId) {
-        job.status = 'fail';
-        job.note = 'Salon MP ou App introuvable';
-        return;
-      }
+      if (!dm || !job.appId) { job.status = 'fail'; job.note = 'Salon MP ou App introuvable'; return; }
       success = await runHeartbeatQuest(token, job, {
         stream_key: `call:${dm.id}:${job.userId}`,
         application_id: job.appId,
       }, signal);
     } else {
-      if (!job.appId) {
-        job.status = 'fail';
-        job.note = 'Application ID introuvable';
-        return;
-      }
+      if (!job.appId) { job.status = 'fail'; job.note = 'Application ID introuvable'; return; }
       success = await runHeartbeatQuest(token, job, { application_id: job.appId }, signal);
     }
 
-    if (signal.aborted) {
-      job.status = 'skip';
-      job.note = 'Arrêtée';
-      return;
-    }
-
-    if (!success) {
-      job.status = 'fail';
-      return;
-    }
+    if (signal.aborted) { job.status = 'skip'; job.note = 'Arrêtée'; return; }
+    if (!success) { job.status = 'fail'; return; }
 
     job.value = job.target;
     job.status = 'done';
@@ -442,29 +395,15 @@ function buildQuestDashboardEmbed(batch) {
     return `${STATUS_ICONS[j.status]} **@${j.username}** — **${j.name.slice(0, 24)}** (${TASK_LABELS[j.task] || j.task})\n\`${bar}\` **${pct}%** (${Math.floor(j.value)}/${Math.floor(j.target)}s)${note}`;
   });
 
-  if (jobs.length > 15) {
-    lines.push(`\n*...et ${jobs.length - 15} autre(s) quête(s) en cours.*`);
-  }
-
-  if (logs.length > 0) {
-    lines.push('\n**📜 Journal récent :**\n' + logs.slice(-4).join('\n'));
-  }
+  if (jobs.length > 15) lines.push(`\n*...et ${jobs.length - 15} autre(s) quête(s) en cours.*`);
+  if (logs.length > 0) lines.push('\n**📜 Journal récent :**\n' + logs.slice(-4).join('\n'));
 
   let title = `📡 Auto-Quêtes Orbs en Temps Réel (${doneCount}/${jobs.length})`;
   let color = 0x5865f2;
-  if (stopped) {
-    title = `🛑 Auto-Quêtes Arrêtées (${doneCount}/${jobs.length})`;
-    color = 0xed4245;
-  } else if (finished) {
-    title = `🏁 Auto-Quêtes Terminées (${doneCount}/${jobs.length})`;
-    color = 0x57f287;
-  }
+  if (stopped) { title = `🛑 Auto-Quêtes Arrêtées (${doneCount}/${jobs.length})`; color = 0xed4245; }
+  else if (finished) { title = `🏁 Auto-Quêtes Terminées (${doneCount}/${jobs.length})`; color = 0x57f287; }
 
-  return new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(lines.join('\n\n') || 'Aucune quête active.')
-    .setColor(color)
-    .setTimestamp();
+  return new EmbedBuilder().setTitle(title).setDescription(lines.join('\n\n') || 'Aucune quête active.').setColor(color).setTimestamp();
 }
 
 class VoiceGatewaySession {
@@ -480,10 +419,7 @@ class VoiceGatewaySession {
     this.stopped = false;
   }
 
-  start() {
-    this.stopped = false;
-    this._connect();
-  }
+  start() { this.stopped = false; this._connect(); }
 
   _connect() {
     if (this.stopped) return;
@@ -496,9 +432,7 @@ class VoiceGatewaySession {
         if (msg.op === 10 && msg.d?.heartbeat_interval) {
           clearInterval(this.hbTimer);
           this.hbTimer = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ op: 1, d: null }));
-            }
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: 1, d: null }));
           }, msg.d.heartbeat_interval);
 
           ws.send(JSON.stringify({
@@ -509,7 +443,6 @@ class VoiceGatewaySession {
               properties: { os: 'linux', browser: 'pydroid', device: 'pydroid' },
             },
           }));
-
           setTimeout(() => this.sendVoiceState(), 600);
         }
       } catch {}
@@ -517,11 +450,8 @@ class VoiceGatewaySession {
 
     ws.on('close', () => {
       clearInterval(this.hbTimer);
-      if (!this.stopped) {
-        setTimeout(() => this._connect(), 3000);
-      }
+      if (!this.stopped) setTimeout(() => this._connect(), 3000);
     });
-
     ws.on('error', () => {});
   }
 
@@ -531,12 +461,7 @@ class VoiceGatewaySession {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
         op: 4,
-        d: {
-          guild_id: this.guildId,
-          channel_id: this.channelId,
-          self_mute: this.selfMute,
-          self_deaf: this.selfDeaf,
-        },
+        d: { guild_id: this.guildId, channel_id: this.channelId, self_mute: this.selfMute, self_deaf: this.selfDeaf },
       }));
     }
   }
@@ -546,10 +471,7 @@ class VoiceGatewaySession {
     clearInterval(this.hbTimer);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
-        this.ws.send(JSON.stringify({
-          op: 4,
-          d: { guild_id: this.guildId, channel_id: null, self_mute: false, self_deaf: false },
-        }));
+        this.ws.send(JSON.stringify({ op: 4, d: { guild_id: this.guildId, channel_id: null, self_mute: false, self_deaf: false } }));
         this.ws.close();
       } catch {}
     }
@@ -558,13 +480,8 @@ class VoiceGatewaySession {
 
 async function connectTokensToVoice(ownerId, tokens, guildId, channelId) {
   let map = activeVoiceSessions.get(ownerId);
-  if (!map) {
-    map = new Map();
-    activeVoiceSessions.set(ownerId, map);
-  }
-  const savedRows = getOwnerTokens(ownerId);
-  const nameByToken = new Map(savedRows.map((r) => [r.token, r.username || 'Compte']));
-
+  if (!map) { map = new Map(); activeVoiceSessions.set(ownerId, map); }
+  const nameByToken = new Map(getOwnerTokens(ownerId).map((r) => [r.token, r.username || 'Compte']));
   for (const t of tokens) {
     if (map.has(t)) map.get(t).stop();
     const sess = new VoiceGatewaySession(t, nameByToken.get(t) || 'Compte', guildId, channelId);
@@ -573,22 +490,14 @@ async function connectTokensToVoice(ownerId, tokens, guildId, channelId) {
   }
 }
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Bot connecté en tant que ${c.user.tag}`);
-
   const commands = [
-    new SlashCommandBuilder()
-      .setName('panel')
-      .setDescription('Ouvre le panneau de contrôle (Comptes, Orbs, Auto-Quêtes, Vocal)'),
-    new SlashCommandBuilder()
-      .setName('help')
-      .setDescription('Affiche le tutoriel complet (Bluecord, PhantomMail, Clone Hub, Vocal & Quêtes)'),
+    new SlashCommandBuilder().setName('panel').setDescription('Ouvre le panneau de contrôle'),
+    new SlashCommandBuilder().setName('help').setDescription('Affiche l’aide du bot'),
   ];
-
   await c.application.commands.set(commands);
   console.log('✅ Commandes /panel et /help enregistrées !');
 });
@@ -601,9 +510,7 @@ function buildMainPanel(ownerId) {
 
   const emb = new EmbedBuilder()
     .setTitle('🎛️ Panneau de Contrôle')
-    .setDescription(
-      'Sélectionne un module ci-dessous pour gérer tes comptes, ton solde **Discord Orbs**, tes **auto-quêtes** ou ta **gestion vocale**.'
-    )
+    .setDescription('Gère tes comptes, ton solde **Discord Orbs**, tes **auto-quêtes** ou ta **gestion vocale**.')
     .setColor(0x5865f2)
     .addFields(
       { name: '🔑 Comptes', value: `**${tokens.length}**`, inline: true },
@@ -614,4 +521,17 @@ function buildMainPanel(ownerId) {
 
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('nav:tokens').setLabel('Gestion des comptes').setEmoji('🔑').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('nav:orbs_bal').setLabel('Solde Orbs').setEmoji('🔮').setS
+    new ButtonBuilder().setCustomId('nav:orbs_bal').setLabel('Solde Orbs').setEmoji('🔮').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('nav:quests').setLabel('Auto-Quêtes').setEmoji('🎁').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('nav:voice').setLabel('Vocal').setEmoji('🔊').setStyle(ButtonStyle.Secondary),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setLabel('YouTube').setURL(YOUTUBE_URL).setStyle(ButtonStyle.Link),
+  );
+  return { embeds: [emb], components: [row1, row2] };
+}
+
+function buildTokensPanel(ownerId) {
+  const rows = getOwnerTokens(ownerId);
+  const desc = rows.length
+  
