@@ -1,7 +1,7 @@
 const {
-  Client, GatewayIntentBits, Événements, SlashCommandBuilder, EmbedBuilder,
-  Indicateurs de message, constructeur de pièces jointes, constructeur de lignes d'action, constructeur de boutons,
-  Style de bouton, constructeur de menu de sélection de chaîne, constructeur de modale, constructeur de saisie de texte,
+  Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder,
+  MessageFlags, AttachmentBuilder, ActionRowBuilder, ButtonBuilder,
+  ButtonStyle, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder,
   TextInputStyle,
 } = require('discord.js');
 const { createCanvas } = require('@napi-rs/canvas');
@@ -24,103 +24,103 @@ const API_V10 = 'https://discord.com/api/v10';
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
 
 const SUPER_PROPS = Buffer.from(JSON.stringify({
-  os : 'Windows',
-  navigateur : « Client Discord »,
+  os: 'Windows',
+  browser: 'Discord Client',
   release_channel: 'stable',
   client_version: '1.0.9255',
   os_version: '10.0.19045',
   os_arch: 'x64',
   system_locale: 'fr',
-  numéro_de_build_client : 382306,
+  client_build_number: 382306,
 })).toString('base64');
 
 const QUEST_TASKS = ['WATCH_VIDEO', 'WATCH_VIDEO_ON_MOBILE', 'PLAY_ON_DESKTOP', 'PLAY_ACTIVITY'];
 const TASK_LABELS = {
-  WATCH_VIDEO : 'Vidéo',
-  REGARDER_LA_VIDÉO_SUR_MOBILE : 'Vidéo Mobile',
-  PLAY_ON_DESKTOP : 'Jeu PC',
-  PLAY_ACTIVITY : 'Activité',
+  WATCH_VIDEO: 'Vidéo',
+  WATCH_VIDEO_ON_MOBILE: 'Vidéo Mobile',
+  PLAY_ON_DESKTOP: 'Jeu PC',
+  PLAY_ACTIVITY: 'Activité',
 };
 const STATUS_ICONS = {
-  attendre : '⏳',
-  s'inscrire : '📝',
-  exécuter : '▶️',
-  fait : '🎁',
-  échec : '❌',
-  ignorer : '🛑',
-  revendiqué : '✅',
+  wait: '⏳',
+  enroll: '📝',
+  run: '▶️',
+  done: '🎁',
+  fail: '❌',
+  skip: '🛑',
+  claimed: '✅',
 };
 
 // ======================================================================
-// BASE DE DONNEES SQLITE (PROPRE & SÉCURISÉE)
+// BASE DE DONNÉES SQLITE (PROPRE & SÉCURISÉE)
 // ======================================================================
 const db = new DatabaseSync(process.env.DB_PATH || 'bot_data.db');
 db.exec('PRAGMA journal_mode = WAL');
 db.exec(`
-  CRÉER LA TABLE IF NOT EXISTS user_tokens (
-    owner_id TEXT NON NULL,
-    jeton TEXTE NON NUL,
-    account_id TEXTE,
-    Nom d'utilisateur TEXTE,
-    ajouté_à INTEGER NOT NULL,
-    CLÉ PRIMAIRE (owner_id, token)
+  CREATE TABLE IF NOT EXISTS user_tokens (
+    owner_id TEXT NOT NULL,
+    token TEXT NOT NULL,
+    account_id TEXT,
+    username TEXT,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (owner_id, token)
   );
-  CRÉER LA TABLE SI ELLE N'EXISTE PAS saved_entities (
-    owner_id TEXT NON NULL,
-    catégorie TEXTE NON NUL,
+  CREATE TABLE IF NOT EXISTS saved_entities (
+    owner_id TEXT NOT NULL,
+    category TEXT NOT NULL,
     entity_id TEXT NOT NULL,
-    nom TEXTE NON NUL,
-    CLÉ PRIMAIRE (owner_id, category, entity_id)
+    name TEXT NOT NULL,
+    PRIMARY KEY (owner_id, category, entity_id)
   );
 `);
 
-fonction getOwnerTokens(ownerId) {
+function getOwnerTokens(ownerId) {
   return db.prepare('SELECT * FROM user_tokens WHERE owner_id = ? ORDER BY added_at ASC').all(ownerId);
 }
-fonction addOwnerToken(ownerId, token, accountId = null, username = 'Inconnu') {
+function addOwnerToken(ownerId, token, accountId = null, username = 'Inconnu') {
   db.prepare(`
     INSERT INTO user_tokens (owner_id, token, account_id, username, added_at)
-    VALEURS (?, ?, ?, ?, ?)
-    EN CAS DE CONFLIT (owner_id, token) FAIRE UNE MISE À JOUR : account_id = excluded.account_id, username = excluded.username
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(owner_id, token) DO UPDATE SET account_id = excluded.account_id, username = excluded.username
   `).run(ownerId, token.trim(), accountId, username, Date.now());
 }
-fonction supprimerTokenPropriétaire(ownerId, token) {
+function removeOwnerToken(ownerId, token) {
   db.prepare('DELETE FROM user_tokens WHERE owner_id = ? AND token = ?').run(ownerId, token);
 }
-fonction clearOwnerTokens(ownerId) {
+function clearOwnerTokens(ownerId) {
   db.prepare('DELETE FROM user_tokens WHERE owner_id = ?').run(ownerId);
 }
-fonction saveEntity(ownerId, category, entityId, name) {
+function saveEntity(ownerId, category, entityId, name) {
   db.prepare(`
-    INSÉRER DANS saved_entities (owner_id, category, entity_id, name)
-    VALEURS (?, ?, ?, ?)
-    EN CAS DE CONFLIT (owner_id, category, entity_id) METTRE À JOUR SET name = excluded.name
+    INSERT INTO saved_entities (owner_id, category, entity_id, name)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(owner_id, category, entity_id) DO UPDATE SET name = excluded.name
   `).run(ownerId, category, entityId, name);
 }
-fonction getEntities(ownerId, category) {
+function getEntities(ownerId, category) {
   return db.prepare('SELECT * FROM saved_entities WHERE owner_id = ? AND category = ?').all(ownerId, category);
 }
 
 // ======================================================================
 // ÉTATS ACTIFS EN MÉMOIRE (VOCAL, TRACKER, AUTO-QUÊTES)
 // ======================================================================
-const activeVoiceSessions = new Map(); // ownerId -> Map<token, VoiceSession>
-const activeTrackers = new Map(); // ownerId -> TrackerSession
-const activeQuestBatches = new Map(); // ownerId -> QuestBatch
+const activeVoiceSessions = new Map();   // ownerId -> Map<token, VoiceSession>
+const activeTrackers = new Map();        // ownerId -> TrackerSession
+const activeQuestBatches = new Map();    // ownerId -> QuestBatch
 
 // ======================================================================
-// AIDE DISCORD API & UTILITAIRES
+// HELPERS DISCORD API & UTILITAIRES
 // ======================================================================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randFloat = (min, max) => Math.random() * (max - min) + min;
 const parseDiscordId = (str) => {
   const m = String(str || '').trim().match(/\d{17,20}/);
-  retourner m ? m[0] : String(str || '').trim();
+  return m ? m[0] : String(str || '').trim();
 };
 
-fonction userHeaders(token, client complet = false) {
+function userHeaders(token, fullClient = false) {
   const h = {
-    Autorisation : token.trim(),
+    Authorization: token.trim(),
     'Content-Type': 'application/json',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9255 Chrome/128.0.6613.186 Electron/32.2.7 Safari/537.36',
   };
@@ -128,63 +128,63 @@ fonction userHeaders(token, client complet = false) {
     h['X-Super-Properties'] = SUPER_PROPS;
     h['X-Discord-Locale'] = 'fr';
   }
-  retourner h;
+  return h;
 }
 
-fonction asynchrone discordApi(token, méthode, chemin, corps = null, apiBase = API_V9, client_complet = vrai) {
-  essayer {
-    const opts = { méthode, en-têtes: userHeaders(jeton, clientcomplet) };
-    si (corps !== null) opts.corps = JSON.stringify(corps);
+async function discordApi(token, method, path, body = null, apiBase = API_V9, fullClient = true) {
+  try {
+    const opts = { method, headers: userHeaders(token, fullClient) };
+    if (body !== null) opts.body = JSON.stringify(body);
     const res = await fetch(`${apiBase}${path}`, opts);
-    soit data = {};
+    let data = {};
     try { data = await res.json(); } catch {}
-    si (res.status === 429) {
+    if (res.status === 429) {
       const wait = (data?.retry_after ? Number(data.retry_after) * 1000 : 5000);
       await sleep(Math.min(wait, 15000));
     }
-    renvoie { statut: res.statut, données };
+    return { status: res.status, data };
   } catch {
-    renvoie { statut: 0, données: {} };
+    return { status: 0, data: {} };
   }
 }
 
-fonction asynchrone verifyToken(token) {
+async function verifyToken(token) {
   const { status, data } = await discordApi(token, 'GET', '/users/@me', null, API_V10, false);
-  si (statut === 200 && données?.id) {
+  if (status === 200 && data?.id) {
     return { valid: true, id: data.id, username: data.username || 'Inconnu', globalName: data.global_name || data.username };
   }
-  retourner { valide : faux };
+  return { valid: false };
 }
 
-fonction asynchrone getOrbsBalance(token) {
+async function getOrbsBalance(token) {
   const { status, data } = await discordApi(token, 'GET', '/users/@me/virtual-currency/balance', null, API_V9, true);
-  si (statut !== 200) retourner null ;
-  si (typeof data === 'number') retourner Math.floor(data);
-  pour (const k de ['balance', 'amount', 'orbs']) {
-    si (typeof data?.[k] === 'number') retourner Math.floor(data[k]);
+  if (status !== 200) return null;
+  if (typeof data === 'number') return Math.floor(data);
+  for (const k of ['balance', 'amount', 'orbs']) {
+    if (typeof data?.[k] === 'number') return Math.floor(data[k]);
   }
-  retourner null ;
+  return null;
 }
 
-fonction asynchrone fetchUserGuilds(token) {
+async function fetchUserGuilds(token) {
   const { status, data } = await discordApi(token, 'GET', '/users/@me/guilds', null, API_V10, false);
-  état de retour === 200 && Array.isArray(data) ? données : [];
+  return status === 200 && Array.isArray(data) ? data : [];
 }
 
-fonction asynchrone fetchGuildChannels(token, guildId) {
+async function fetchGuildChannels(token, guildId) {
   const { status, data } = await discordApi(token, 'GET', `/guilds/${guildId}/channels`, null, API_V10, false);
-  état de retour === 200 && Array.isArray(data) ? données : [];
+  return status === 200 && Array.isArray(data) ? data : [];
 }
 
-fonction asynchrone fetchGuildName(token, guildId) {
+async function fetchGuildName(token, guildId) {
   const { status, data } = await discordApi(token, 'GET', `/guilds/${guildId}`, null, API_V10, false);
   return status === 200 && data?.name ? data.name : `Serveur_${guildId.slice(0, 6)}`;
 }
 
 // ======================================================================
-// IMAGE TOILE : SOLDE D'ORBS (DÉGRADÉ VIOLET / BLEU)
+// IMAGE CANVAS : SOLDE D'ORBS (DÉGRADÉ VIOLET / BLEU)
 // ======================================================================
-fonction generateOrbsBalanceImage(accountsData) {
+function generateOrbsBalanceImage(accountsData) {
   const rowHeight = 62;
   const headerH = 210;
   const footerH = 70;
@@ -192,46 +192,46 @@ fonction generateOrbsBalanceImage(accountsData) {
   const W = 900;
   const H = headerH + rowsCount * rowHeight + footerH;
 
-  const canvas = créerCanvas(W, H);
+  const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
   // Dégradé principal Violet -> Bleu profond
   const bg = ctx.createLinearGradient(0, 0, W, H);
-  bg.addColorStop(0, '#4c1d95'); // Violet profond
+  bg.addColorStop(0, '#4c1d95');   // Violet profond
   bg.addColorStop(0.5, '#3b82f6'); // Bleu électrique
-  bg.addColorStop(1, '#1e1b4b'); // Nuit indigo
+  bg.addColorStop(1, '#1e1b4b');   // Indigo nuit
   ctx.fillStyle = bg;
   ctx.beginPath();
-  ctx.roundRect(0, 0, L, H, 32);
+  ctx.roundRect(0, 0, W, H, 32);
   ctx.fill();
 
-  // Halo lumineux décoratifs
+  // Halos lumineux décoratifs
   ctx.save();
   ctx.beginPath();
-  ctx.roundRect(0, 0, L, H, 32);
+  ctx.roundRect(0, 0, W, H, 32);
   ctx.clip();
 
   const glow1 = ctx.createRadialGradient(140, 80, 10, 140, 80, 280);
   glow1.addColorStop(0, 'rgba(168, 85, 247, 0.55)');
   glow1.addColorStop(1, 'rgba(168, 85, 247, 0)');
   ctx.fillStyle = glow1;
-  ctx.fillRect(0, 0, L, H);
+  ctx.fillRect(0, 0, W, H);
 
   const glow2 = ctx.createRadialGradient(W - 140, H - 80, 10, W - 140, H - 80, 300);
   glow2.addColorStop(0, 'rgba(56, 189, 248, 0.5)');
   glow2.addColorStop(1, 'rgba(56, 189, 248, 0)');
   ctx.fillStyle = glow2;
-  ctx.fillRect(0, 0, L, H);
+  ctx.fillRect(0, 0, W, H);
 
   ctx.fillStyle = 'rgba(10, 12, 28, 0.35)';
-  ctx.fillRect(0, 0, L, H);
+  ctx.fillRect(0, 0, W, H);
   ctx.restore();
 
   // Bordure subtile
   ctx.lineWidth = 4;
   ctx.strokeStyle = 'rgba(196, 181, 253, 0.45)';
   ctx.beginPath();
-  ctx.roundRect(2, 2, L - 4, H - 4, 30);
+  ctx.roundRect(2, 2, W - 4, H - 4, 30);
   ctx.stroke();
 
   // Calcul du solde total
@@ -240,13 +240,13 @@ fonction generateOrbsBalanceImage(accountsData) {
   // En-tête
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ddd6fe';
-  ctx.font = 'gras 22px sans-serif';
-  ctx.fillText('🔮 VENDU TOTAL D'ORBES DISCORD', W / 2, 55);
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillText('🔮 SOLDE TOTAL DISCORD ORBS', W / 2, 55);
 
   ctx.fillStyle = '#ffffff';
-  ctx.font = 'gras 74px sans-serif';
+  ctx.font = 'bold 74px sans-serif';
   ctx.shadowColor = 'rgba(139, 92, 246, 0.8)';
-  ctx.shadowBlur = 20 ;
+  ctx.shadowBlur = 20;
   ctx.fillText(`${totalOrbs.toLocaleString('fr-FR')} ORBS`, W / 2, 135);
   ctx.shadowBlur = 0;
 
@@ -255,8 +255,8 @@ fonction generateOrbsBalanceImage(accountsData) {
   ctx.fillText(`Détail par compte (${accountsData.length} actif${accountsData.length > 1 ? 's' : ''})`, W / 2, 178);
 
   // Liste des comptes
-  soit y = headerH;
-  pour (const acc de accountsData) {
+  let y = headerH;
+  for (const acc of accountsData) {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
     ctx.beginPath();
     ctx.roundRect(50, y, W - 100, 48, 14);
@@ -264,23 +264,23 @@ fonction generateOrbsBalanceImage(accountsData) {
 
     ctx.textAlign = 'left';
     ctx.fillStyle = acc.valid ? '#ffffff' : '#fca5a5';
-    ctx.font = 'gras 22px sans-serif';
-    ctx.fillText(acc.valid ? `@${acc.username}` : 'Jeton invalide', 75, y + 31);
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText(acc.valid ? `@${acc.username}` : 'Token invalide', 75, y + 31);
 
     ctx.textAlign = 'right';
     ctx.fillStyle = acc.valid ? '#7dd3fc' : '#f87171';
-    ctx.font = 'gras 24px sans-serif';
+    ctx.font = 'bold 24px sans-serif';
     const valStr = acc.valid ? `${(acc.orbs ?? 0).toLocaleString('fr-FR')} Orbs` : 'Erreur';
     ctx.fillText(valStr, W - 75, y + 32);
 
-    y += hauteur_de_ligne;
+    y += rowHeight;
   }
 
   // Pied de page
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
   ctx.font = '600 17px sans-serif';
-  ctx.fillText('Kiozi Self-Panel • Système Orbs & Quêtes Automatiques', W/2, H - 25);
+  ctx.fillText('Kiozi Self-Panel • Système Orbs & Quêtes Automatiques', W / 2, H - 25);
 
   return canvas.encode('png');
 }
@@ -288,131 +288,131 @@ fonction generateOrbsBalanceImage(accountsData) {
 // ======================================================================
 // MOTEUR 1 : AUTO-QUÊTES ORBS (TEMPS RÉEL + STOP BOUTON ROUGE)
 // ======================================================================
-fonction parseQuest(q) {
+function parseQuest(q) {
   const cfg = q.config || {};
   const tcfg = cfg.task_config_v2 || cfg.taskConfigV2 || cfg.task_config || {};
   const st = q.user_status || {};
-  const tâches = tcfg.tâches || {};
-  const tâche = QUEST_TASKS.find((k) => k dans tâches) || null;
-  const info = tâche ? tâches[tâche] : {};
-  const applications = info.applications || [{}];
+  const tasks = tcfg.tasks || {};
+  const task = QUEST_TASKS.find((k) => k in tasks) || null;
+  const info = task ? tasks[task] : {};
+  const apps = info.applications || [{}];
   const progressVal = st.progress?.[task]?.value ?? 0;
   const expiresAt = cfg.expires_at ? Date.parse(cfg.expires_at) : Infinity;
 
-  retourner {
+  return {
     id: q.id,
-    nom : cfg.messages?.quest_name || q.id,
-    tâche,
-    cible : Nombre(info.target || 0),
-    appId : apps[0]?.id || null,
-    inscritÀ : st.enrolled_at || null,
-    valeur : Nombre(progressVal),
-    terminé : booléen(st.completed_at),
-    revendiqué : booléen(st.claimed_at),
-    expiré : expire à < Date.now(),
-    scellé : q.traffic_metadata_sealed || null,
+    name: cfg.messages?.quest_name || q.id,
+    task,
+    target: Number(info.target || 0),
+    appId: apps[0]?.id || null,
+    enrolledAt: st.enrolled_at || null,
+    value: Number(progressVal),
+    done: Boolean(st.completed_at),
+    claimed: Boolean(st.claimed_at),
+    expired: expiresAt < Date.now(),
+    sealed: q.traffic_metadata_sealed || null,
   };
 }
 
-fonction asynchrone fetchUserQuests(token) {
+async function fetchUserQuests(token) {
   const { status, data } = await discordApi(token, 'GET', '/quests/@me', null, API_V9, true);
-  si (statut !== 200) retourner [];
+  if (status !== 200) return [];
   const rawList = Array.isArray(data) ? data : (data?.quests || []);
   return rawList.map(parseQuest);
 }
 
-fonction asynchrone claimQuestReward(token, quest) {
-  const corps = { emplacement: 11, est_ciblé: faux };
-  si (quest.sealed) body.traffic_metadata_sealed = quest.sealed;
+async function claimQuestReward(token, quest) {
+  const body = { location: 11, is_targeted: false };
+  if (quest.sealed) body.traffic_metadata_sealed = quest.sealed;
   const { status, data } = await discordApi(token, 'POST', `/quests/${quest.id}/claim-reward`, body, API_V9, true);
-  if (status === 200) return { ok : true, msg : 'Réclamée !' } ;
+  if (status === 200) return { ok: true, msg: 'Réclamée !' };
   if (data?.captcha_key) return { ok: false, msg: 'Captcha requis (réclame à la main)' };
-  return { ok : false, msg : `Refusé (${status})` };
+  return { ok: false, msg: `Refusé (${status})` };
 }
 
-fonction asynchrone runVideoQuest(token, job, signal) {
-  const registeredMs = job.enrolledAt ? Date.parse(job.enrolledAt) : Date.now();
-  tant que (job.value < job.target && !signal.aborted) {
-    const elapsedSec = (Date.now() - registeredMs) / 1000;
-    si (elapsedSec + 10 - job.value >= 7) {
+async function runVideoQuest(token, job, signal) {
+  const enrolledMs = job.enrolledAt ? Date.parse(job.enrolledAt) : Date.now();
+  while (job.value < job.target && !signal.aborted) {
+    const elapsedSec = (Date.now() - enrolledMs) / 1000;
+    if (elapsedSec + 10 - job.value >= 7) {
       job.value = Math.min(job.target, job.value + randFloat(7.0, 9.5));
-      const { statut, données } = await discordApi(
-        jeton,
+      const { status, data } = await discordApi(
+        token,
         'POST',
         `/quests/${job.id}/video-progress`,
         { timestamp: Number(job.value.toFixed(6)) },
         API_V9,
-        vrai
+        true
       );
-      si (statut === 200 && données?.completed_at) retourner vrai ;
+      if (status === 200 && data?.completed_at) return true;
       await sleep(randFloat(7000, 9500));
     } else {
       await sleep(1000);
     }
   }
-  si (signal.aborted) retourner faux ;
+  if (signal.aborted) return false;
   await discordApi(token, 'POST', `/quests/${job.id}/video-progress`, { timestamp: job.target }, API_V9, true);
-  renvoie vrai ;
+  return true;
 }
 
-fonction asynchrone runHeartbeatQuest(token, job, baseBody, signal) {
-  soit fails = 0 ;
-  soit stalls = 0 ;
+async function runHeartbeatQuest(token, job, baseBody, signal) {
+  let fails = 0;
+  let stalls = 0;
 
-  tant que (job.value < job.target && !signal.aborted) {
-    const { statut, données } = await discordApi(
-      jeton,
+  while (job.value < job.target && !signal.aborted) {
+    const { status, data } = await discordApi(
+      token,
       'POST',
       `/quests/${job.id}/heartbeat`,
-      { ...baseBody, terminé : faux },
+      { ...baseBody, terminated: false },
       API_V9,
-      vrai
+      true
     );
-    si (statut !== 200) {
-      fails += 1 ;
+    if (status !== 200) {
+      fails += 1;
       job.note = `Heartbeat refusé (${fails}/3)`;
-      si (échecs >= 3) retourner faux ;
+      if (fails >= 3) return false;
     } else {
-      échecs = 0 ;
+      fails = 0;
       job.note = '';
       const newVal = Number(data?.progress?.[job.task]?.value ?? job.value);
-      stalles = nouvelleVal <= job.value ? stalles + 1 : 0;
-      valeur de l'emploi = Math.max(valeur de l'emploi, nouvelleVal);
+      stalls = newVal <= job.value ? stalls + 1 : 0;
+      job.value = Math.max(job.value, newVal);
       if (data?.completed_at) break;
-      si (stands >= 5) {
+      if (stalls >= 5) {
         job.note = 'Discord ne crédite pas la progression';
-        retourner faux ;
+        return false;
       }
     }
-    pour (soit i = 0 ; i < 60 && !signal.aborted ; i++) {
+    for (let i = 0; i < 60 && !signal.aborted; i++) {
       await sleep(1000);
     }
   }
 
-  si (signal.aborted) retourner faux ;
+  if (signal.aborted) return false;
   await discordApi(
-    jeton,
+    token,
     'POST',
     `/quests/${job.id}/heartbeat`,
-    { ...baseBody, terminé : vrai },
+    { ...baseBody, terminated: true },
     API_V9,
-    vrai
+    true
   );
-  renvoie vrai ;
+  return true;
 }
 
-fonction asynchrone executeQuestJob(job, signal, logs) {
+async function executeQuestJob(job, signal, logs) {
   const token = job.token;
-  essayer {
+  try {
     if (!job.enrolledAt) {
       job.status = 'enroll';
-      const corps = { emplacement: 11, est_ciblé: faux };
-      si (job.sealed) body.traffic_metadata_sealed = job.sealed;
+      const body = { location: 11, is_targeted: false };
+      if (job.sealed) body.traffic_metadata_sealed = job.sealed;
       const { status, data } = await discordApi(token, 'POST', `/quests/${job.id}/enroll`, body, API_V9, true);
-      si (statut !== 200) {
+      if (status !== 200) {
         job.status = 'fail';
         job.note = `Acceptation refusée (${status})`;
-        retour;
+        return;
       }
       job.enrolledAt = data?.enrolled_at || new Date().toISOString();
     }
@@ -420,73 +420,73 @@ fonction asynchrone executeQuestJob(job, signal, logs) {
     if (signal.aborted) {
       job.status = 'skip';
       job.note = 'Arrêtée';
-      retour;
+      return;
     }
 
     job.status = 'run';
-    soit success = faux ;
+    let success = false;
 
     if (job.task.startsWith('WATCH')) {
-      succès = attendre runVideoQuest(jeton, tâche, signal);
-    } sinon si (job.task === 'PLAY_ACTIVITY') {
+      success = await runVideoQuest(token, job, signal);
+    } else if (job.task === 'PLAY_ACTIVITY') {
       const { status, data } = await discordApi(token, 'GET', '/users/@me/channels', null, API_V9, true);
       const dm = status === 200 && Array.isArray(data) ? data.find((c) => c.type === 1 || c.type === 3) : null;
-      si (!dm || !job.appId) {
+      if (!dm || !job.appId) {
         job.status = 'fail';
         job.note = 'Salon MP ou App introuvable';
-        retour;
+        return;
       }
-      succès = attendre runHeartbeatQuest(jeton, tâche, {
+      success = await runHeartbeatQuest(token, job, {
         stream_key: `call:${dm.id}:${job.userId}`,
-        application_id : job.appId,
+        application_id: job.appId,
       }, signal);
     } else {
       if (!job.appId) {
         job.status = 'fail';
-        job.note = 'ID d'application introuvable';
-        retour;
+        job.note = 'Application ID introuvable';
+        return;
       }
-      succès = await runHeartbeatQuest(token, job, { application_id: job.appId }, signal);
+      success = await runHeartbeatQuest(token, job, { application_id: job.appId }, signal);
     }
 
     if (signal.aborted) {
       job.status = 'skip';
       job.note = 'Arrêtée';
-      retour;
+      return;
     }
 
     if (!success) {
       job.status = 'fail';
-      retour;
+      return;
     }
 
     job.value = job.target;
-    job.status = 'terminé';
+    job.status = 'done';
     job.note = 'Réclamation automatique...';
     await sleep(randFloat(3000, 5000));
 
     const freshList = await fetchUserQuests(token);
     const freshQuest = freshList.find((x) => x.id === job.id) || job;
     const claimRes = await claimQuestReward(token, freshQuest);
-    si (claimRes.ok) {
-      job.status = 'revendiqué';
+    if (claimRes.ok) {
+      job.status = 'claimed';
       job.note = '';
       logs.push(`✅ **@${job.username}** : ${job.name.slice(0, 25)} réclamée !`);
     } else {
       job.note = claimRes.msg;
       logs.push(`⚠️ **@${job.username}** : ${job.name.slice(0, 25)} (${claimRes.msg})`);
     }
-  } attraper (erreur) {
+  } catch (err) {
     job.status = signal.aborted ? 'skip' : 'fail';
     job.note = signal.aborted ? 'Arrêtée' : String(err.message || err).slice(0, 35);
   }
 }
 
 function buildQuestDashboardEmbed(batch) {
-  const { tâches, journaux, arrêté, terminé } = lot;
+  const { jobs, logs, stopped, finished } = batch;
   const doneCount = jobs.filter((j) => j.status === 'done' || j.status === 'claimed').length;
 
-  const lignes = jobs.slice(0, 15).map((j) => {
+  const lines = jobs.slice(0, 15).map((j) => {
     const pct = j.target > 0 ? Math.min(100, Math.floor((j.value / j.target) * 100)) : 0;
     const filled = Math.round((pct / 100) * 12);
     const bar = '█'.repeat(filled) + '░'.repeat(12 - filled);
@@ -494,36 +494,36 @@ function buildQuestDashboardEmbed(batch) {
     return `${STATUS_ICONS[j.status]} **@${j.username}** — **${j.name.slice(0, 24)}** (${TASK_LABELS[j.task] || j.task})\n\`${bar}\` **${pct}%** (${Math.floor(j.value)}/${Math.floor(j.target)}s)${note}`;
   });
 
-  si (jobs.length > 15) {
+  if (jobs.length > 15) {
     lines.push(`\n*...et ${jobs.length - 15} autre(s) quête(s) en cours.*`);
   }
 
-  si (logs.length > 0) {
-    lignes.push('\n**📜 Journal récent :**\n' + logs.slice(-4).join('\n'));
+  if (logs.length > 0) {
+    lines.push('\n**📜 Journal récent :**\n' + logs.slice(-4).join('\n'));
   }
 
   let title = `📡 Auto-Quêtes Orbs en Temps Réel (${doneCount}/${jobs.length})`;
-  soit couleur = 0x5865f2 ;
-  si (arrêté) {
+  let color = 0x5865f2;
+  if (stopped) {
     title = `🛑 Auto-Quêtes Arrêtées (${doneCount}/${jobs.length})`;
-    couleur = 0xed4245;
-  } sinon si (terminé) {
+    color = 0xed4245;
+  } else if (finished) {
     title = `🏁 Auto-Quêtes Terminées (${doneCount}/${jobs.length})`;
-    couleur = 0x57f287;
+    color = 0x57f287;
   }
 
   return new EmbedBuilder()
     .setTitle(title)
-    .setDescription(lines.join('\n\n') || 'Quête Aucune active.')
+    .setDescription(lines.join('\n\n') || 'Aucune quête active.')
     .setColor(color)
     .setTimestamp();
 }
 
 // ======================================================================
-// MOTEUR 2 : GESTION VOCALE (GATEWAY MULTI-COMPTES, MUTE, SOURD, CONGÉ)
+// MOTEUR 2 : GESTION VOCALE (GATEWAY MULTI-COMPTES, MUTE, DEAF, LEAVE)
 // ======================================================================
 class VoiceGatewaySession {
-  constructeur (jeton, nom d'utilisateur, guildId, channelId) {
+  constructor(token, username, guildId, channelId) {
     this.token = token;
     this.username = username;
     this.guildId = guildId;
@@ -546,12 +546,12 @@ class VoiceGatewaySession {
     this.ws = ws;
 
     ws.on('message', (raw) => {
-      essayer {
+      try {
         const msg = JSON.parse(raw.toString());
-        si (msg.op === 10 && msg.d?.heartbeat_interval) {
+        if (msg.op === 10 && msg.d?.heartbeat_interval) {
           clearInterval(this.hbTimer);
           this.hbTimer = setInterval(() => {
-            si (ws.readyState === WebSocket.OPEN) {
+            if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ op: 1, d: null }));
             }
           }, msg.d.heartbeat_interval);
@@ -559,12 +559,33 @@ class VoiceGatewaySession {
           ws.send(JSON.stringify({
             op: 2,
             d: {
-              jeton : this.token,
-              intentions : 0,
-              propriétés : { os : 'linux', browser : 'pydroid', device : 'pydroid' },
+              token: this.token,
+              intents: 0,
+              properties: { os: 'linux', browser: 'pydroid', device: 'pydroid' },
             },
           }));
 
           setTimeout(() => this.sendVoiceState(), 600);
-}
-      
+        }
+      } catch {}
+    });
+
+    ws.on('close', () => {
+      clearInterval(this.hbTimer);
+      if (!this.stopped) {
+        setTimeout(() => this._connect(), 3000);
+      }
+    });
+
+    ws.on('error', () => {});
+  }
+
+  sendVoiceState(mute = this.selfMute, deaf = this.selfDeaf) {
+    this.selfMute = mute;
+    this.selfDeaf = deaf;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({
+        op: 4,
+        d: {
+          guild_id: this.guildId,
+          channel_id
