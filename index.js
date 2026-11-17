@@ -609,5 +609,4 @@ function buildAccountsRows(accounts) {
     rows.push(new ActionRowBuilder().addComponents(menu));
   }
 
-  return rows;
-                                                                                                                                                                  }
+    return rows;                                                                                                                                                                 }
