@@ -127,6 +127,46 @@ async function fetchAccounts() {
   return results;
 }
 
+function parseQuestsList(raw) {
+  const list = Array.isArray(raw) ? raw : raw?.quests || [];
+  return list.map((q) => {
+    const cfg = q?.config || {};
+    const name = cfg?.messages?.quest_name || q?.id || "Quête";
+    const st = q?.user_status || {};
+    const status = st?.claimed_at
+      ? "Réclamée"
+      : st?.completed_at
+      ? "Terminée"
+      : st?.enrolled_at
+      ? "En cours"
+      : "Disponible";
+    return {
+      id: q?.id,
+      name,
+      status,
+    };
+  });
+}
+
+async function scanAllQuests() {
+  const accounts = await fetchAccounts();
+  const scanned = [];
+
+  for (let i = 0; i < accounts.length; i++) {
+    const acc = accounts[i];
+    if (!acc.valid) continue;
+    const qRes = await apiReq(acc.token, "GET", "/quests/@me");
+    const quests = qRes.status === 200 ? parseQuestsList(qRes.data) : [];
+    scanned.push({
+      index: i,
+      username: acc.username,
+      userId: acc.userId,
+      quests,
+    });
+  }
+  return scanned;
+}
+
 function buildBalancesEmbed(accounts) {
   const total = accounts.reduce((acc, a) => acc + (a.valid ? a.balance : 0), 0);
 
@@ -163,6 +203,39 @@ function buildAccountsManageEmbed(accounts) {
     .setTitle(`👤 ${BOT_NAME} — Gestion des comptes`)
     .setColor(0x5865f2)
     .setDescription(lines.length ? lines.join("\n") : "Aucun compte enregistré.")
+    .setTimestamp();
+}
+
+function buildScanEmbed(scanned) {
+  if (!scanned.length) {
+    return new EmbedBuilder()
+      .setTitle(`🔍 ${BOT_NAME} — Scan des quêtes`)
+      .setColor(0x5865f2)
+      .setDescription("Aucun compte valide à scanner.")
+      .setTimestamp();
+  }
+
+  const lines = scanned.map(
+    (s) => `• **@${s.username}** — **${s.quests.length}** quête(s) détectée(s)`
+  );
+
+  return new EmbedBuilder()
+    .setTitle(`🔍 ${BOT_NAME} — Scan des quêtes`)
+    .setColor(0x5865f2)
+    .setDescription(lines.join("\n"))
+    .setFooter({ text: "Clique sur un bouton de compte pour voir ses quêtes" })
+    .setTimestamp();
+}
+
+function buildAccountQuestsEmbed(entry) {
+  const lines = entry.quests.length
+    ? entry.quests.map((q, idx) => `${idx + 1}. **${q.name}** — *${q.status}*`)
+    : ["Aucune quête sur ce compte."];
+
+  return new EmbedBuilder()
+    .setTitle(`📜 Quêtes de @${entry.username}`)
+    .setColor(0x5865f2)
+    .setDescription(lines.join("\n"))
     .setTimestamp();
 }
 
@@ -204,11 +277,37 @@ function buildPanelComponents() {
       .setLabel("Lancer les quêtes")
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
+      .setCustomId("baque_scan")
+      .setLabel("Scanner les quêtes")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
       .setCustomId("baque_accounts")
       .setLabel("Gérer les comptes")
       .setStyle(ButtonStyle.Secondary)
   );
   return [row];
+}
+
+function buildScanComponents(scanned) {
+  const rows = [];
+  const accountButtons = scanned.slice(0, 4).map((s) =>
+    new ButtonBuilder()
+      .setCustomId(`baque_scan_acc_${s.index}`)
+      .setLabel(`Quêtes @${s.username} (${s.quests.length})`)
+      .setStyle(ButtonStyle.Primary)
+  );
+  if (accountButtons.length) {
+    rows.push(new ActionRowBuilder().addComponents(accountButtons));
+  }
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("baque_back")
+        .setLabel("Retour")
+        .setStyle(ButtonStyle.Secondary)
+    )
+  );
+  return rows;
 }
 
 function buildAccountManageComponents() {
@@ -304,6 +403,23 @@ client.on("interactionCreate", async (interaction) => {
         embeds: [buildBalancesEmbed(accounts)],
         components: buildPanelComponents(),
       });
+    } else if (interaction.customId === "baque_scan") {
+      const scanned = await scanAllQuests();
+      await interaction.editReply({
+        embeds: [buildScanEmbed(scanned)],
+        components: buildScanComponents(scanned),
+      });
+    } else if (interaction.customId.startsWith("baque_scan_acc_")) {
+      const targetIdx = Number.parseInt(interaction.customId.replace("baque_scan_acc_", ""), 10);
+      const scanned = await scanAllQuests();
+      const entry = scanned.find((s) => s.index === targetIdx) || {
+        username: "?",
+        quests: [],
+      };
+      await interaction.editReply({
+        embeds: [buildAccountQuestsEmbed(entry)],
+        components: buildScanComponents(scanned),
+      });
     } else if (interaction.customId === "baque_accounts") {
       const accounts = await fetchAccounts();
       await interaction.editReply({
@@ -359,3 +475,4 @@ if (!process.env.DISCORD_TOKEN) {
 }
 
 client.login(process.env.DISCORD_TOKEN);
+        
