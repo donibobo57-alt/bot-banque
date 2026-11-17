@@ -1,15 +1,12 @@
 {
-  "name": "bot-banque",
+  "name": "bot-baque",
   "version": "1.0.0",
-  "description": "Bot Discord Auto-Quete (/panel et /help)",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@napi-rs/canvas": "^0.1.52",
     "discord.js": "^14.16.3",
-    "ws": "^8.18.0"
+    "dotenv": "^16.4.5"
   }
 }
