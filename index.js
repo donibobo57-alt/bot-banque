@@ -1,459 +1,209 @@
-import fs from "node:fs";
-import path from "node:path";
-import dotenv from "dotenv";
-import { createCanvas, loadImage } from "@napi-rs/canvas";
-import {
-  ActionRowBuilder,
-  AttachmentBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  Client,
-  EmbedBuilder,
-  GatewayIntentBits,
-  ModalBuilder,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-} from "discord.js";
-
-dotenv.config();
-
-const BOT_NAME = "bot-baque";
-const API = "https://discord.com/api/v9";
-const CONFIG_PATH = path.resolve("tokens_config.json");
-const CLAIM_AUTO = true; // réclame automatiquement chaque quête finie[span_1](start_span)[span_1](end_span)
-
-const SUPER_PROPS = Buffer.from(
-  JSON.stringify({
-    os: "Windows",
-    browser: "Discord Client",
-    release_channel: "stable",
-    client_version: "1.0.9255",
-    os_version: "10.0.19045",
-    os_arch: "x64",
-    system_locale: "fr",
-    client_build_number: 382306,
-  })
-).toString("base64");
-
-function loadConfig() {
-  try {
-    if (!fs.existsSync(CONFIG_PATH)) return { tokens: [] };
-    const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-    const tokens = Array.isArray(raw.tokens)
-      ? raw.tokens.map((t) => String(t).trim()).filter(Boolean)
-      : [];
-    return { ...raw, tokens };
-  } catch {
-    return { tokens: [] };
-  }
-}
-
-function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf8");
-}
-
-function userHeaders(token) {
-  return {
-    Authorization: token.trim(),
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9255 Chrome/128.0.6613.186 Electron/32.2.7 Safari/537.36",
-    "Content-Type": "application/json",
-    "X-Super-Properties": SUPER_PROPS,
-    "X-Discord-Locale": "fr",
-  };
-}
-
-async function apiReq(token, method, endpoint, body = null) {
-  const opts = {
-    method,
-    headers: userHeaders(token),
-  };
-  if (body !== null) {
-    opts.body = JSON.stringify(body);
-  }
-  let res = await fetch(`${API}${endpoint}`, opts);
-  if (res.status === 429) {
-    await new Promise((r) => setTimeout(r, 5000));
-    res = await fetch(`${API}${endpoint}`, opts);
-  }
-  let data = {};
-  try {
-    data = await res.json();
-  } catch {
-    data = {};
-  }
-  return { status: res.status, data };
-}
-
-function getAvatarUrl(userId, avatarHash) {
-  if (userId && avatarHash) {
-    return `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.png?size=128`;
-  }
-  const idx = userId && /^\d+$/.test(userId) ? Number((BigInt(userId) >> 22n) % 6n) : 0;
-  return `https://cdn.discordapp.com/embed/avatars/${idx}.png`;
-}
-
-async function fetchAccounts() {
-  const { tokens } = loadConfig();
-  const results = [];
-
-  for (const token of tokens) {
-    const me = await apiReq(token, "GET", "/users/@me");
-    if (me.status !== 200 || !me.data?.id) {
-      results.push({
-        valid: false,
-        userId: null,
-        username: "Token invalide",
-        avatarUrl: null,
-        balance: 0,
-        token,
-      });
-      continue;
-    }
-
-    const balRes = await apiReq(token, "GET", "/users/@me/virtual-currency/balance");
-    let balance = 0;
-    if (balRes.status === 200) {
-      if (typeof balRes.data === "number") {
-        balance = Math.trunc(balRes.data);
-      } else if (balRes.data && typeof balRes.data === "object") {
-        for (const k of ["balance", "amount", "orbs"]) {
-          if (typeof balRes.data[k] === "number") {
-            balance = Math.trunc(balRes.data[k]);
-            break;
-          }
-        }
-      }
-    }
-
-    results.push({
-      valid: true,
-      userId: me.data.id,
-      username: me.data.username || "?",
-      avatarUrl: getAvatarUrl(me.data.id, me.data.avatar),
-      balance,
-      token,
-    });
-  }
-  return results;
-}
-
-// ==============================================================================
-// GÉNÉRATION D'IMAGES DYNAMIQUES
-// ==============================================================================
-
-async function generatePanelImage(accounts) {
-  const width = 820;
-  const height = 420;
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-
-  // Dégradé violet et bleu pour /panel
-  const grad = ctx.createLinearGradient(0, 0, width, height);
-  grad.addColorStop(0, "#6D28D9");
-  grad.addColorStop(1, "#1D4ED8");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.fillStyle = "rgba(15, 23, 42, 0.35)";
-  ctx.roundRect(28, 28, width - 56, height - 56, 24);
-  ctx.fill();
-
-  ctx.fillStyle = "#FFFFFF";
-  ctx.font = "bold 36px Sans-Serif";
-  ctx.fillText(`${BOT_NAME.toUpperCase()} • PANEL`, 60, 95);
-
-  const validCount = accounts.filter((a) => a.valid).length;
-  const totalOrbs = accounts.reduce((acc, a) => acc + (a.valid ? a.balance : 0), 0);
-
-  ctx.font = "24px Sans-Serif";
-  ctx.fillStyle = "#E0E7FF";
-  ctx.fillText(`Comptes actifs : ${validCount}`, 60, 165);
-  ctx.fillText(`Total des Orbs : ${totalOrbs} Orbs`, 60, 215);
-  ctx.fillText("Utilisez les boutons ci-dessous pour gérer vos comptes & quêtes.", 60, 285);
-
-  return new AttachmentBuilder(canvas.toBuffer("image/png"), { name: "panel.png" });
-}
-
-async function generateNoAccountImage() {
-  const width = 820;
-  const height = 420;
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-
-  // Dégradé jaune et rouge s'il n'y a pas de compte
-  const grad = ctx.createLinearGradient(0, 0, width, height);
-  grad.addColorStop(0, "#FACC15");
-  grad.addColorStop(1, "#DC2626");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
-  ctx.roundRect(36, 36, width - 72, height - 72, 24);
-  ctx.fill();
-
-  ctx.fillStyle = "#FFFFFF";
-  ctx.font = "bold 52px Sans-Serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("AUCUN COMPTE", width / 2, height / 2 - 18);
-
-  ctx.font = "24px Sans-Serif";
-  ctx.fillText("Ajoutez un token pour afficher les soldes et profils", width / 2, height / 2 + 38);
-
-  return new AttachmentBuilder(canvas.toBuffer("image/png"), { name: "no_account.png" });
-}
-
-async function generateAccountsCardImage(accounts) {
-  const validAccounts = accounts.filter((a) => a.valid);
-  if (validAccounts.length === 0) {
-    return generateNoAccountImage();
-  }
-
-  const width = 860;
-  const rowHeight = 86;
-  const height = 160 + validAccounts.length * rowHeight + 40;
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-
-  // Dégradé vert et bleu lorsqu'il y a au moins un compte
-  const grad = ctx.createLinearGradient(0, 0, width, height);
-  grad.addColorStop(0, "#10B981");
-  grad.addColorStop(1, "#0284C7");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.fillStyle = "rgba(15, 23, 42, 0.38)";
-  ctx.roundRect(24, 24, width - 48, height - 48, 24);
-  ctx.fill();
-
-  // En haut : le solde des Orbs
-  const totalOrbs = validAccounts.reduce((acc, a) => acc + a.balance, 0);
-  ctx.fillStyle = "#FFFFFF";
-  ctx.font = "bold 30px Sans-Serif";
-  ctx.textAlign = "left";
-  ctx.fillText(`Solde des Orbs : ${totalOrbs} Orbs`, 52, 76);
-
-  ctx.font = "19px Sans-Serif";
-  ctx.fillStyle = "#DCFCE7";
-  ctx.fillText(`Comptes (${validAccounts.length})`, 52, 114);
-
-  // De l'autre côté (côté droit) : profils pour chacun des comptes
-  let y = 148;
-  for (const acc of validAccounts) {
-    ctx.fillStyle = "rgba(255, 255, 255, 0.10)";
-    ctx.roundRect(44, y, width - 88, rowHeight - 14, 16);
-    ctx.fill();
-
-    const rightX = width - 64;
-    const avatarSize = 54;
-    const avatarX = rightX - avatarSize;
-    const avatarY = y + (rowHeight - 14 - avatarSize) / 2;
-
-    // Profil arrondi à droite
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2);
-    ctx.closePath();
-    ctx.clip();
-
-    try {
-      const avImg = await loadImage(acc.avatarUrl);
-      ctx.drawImage(avImg, avatarX, avatarY, avatarSize, avatarSize);
-    } catch {
-      ctx.fillStyle = "#1E293B";
-      ctx.fillRect(avatarX, avatarY, avatarSize, avatarSize);
-    }
-    ctx.restore();
-
-    // Nom du compte + solde individuel à gauche de son profil
-    ctx.fillStyle = "#FFFFFF";
-    ctx.font = "bold 22px Sans-Serif";
-    ctx.textAlign = "right";
-    ctx.fillText(`@${acc.username} (${acc.balance} Orbs)`, avatarX - 18, y + 43);
-
-    y += rowHeight;
-  }
-
-  return new AttachmentBuilder(canvas.toBuffer("image/png"), { name: "accounts.png" });
-}
-
-// ==============================================================================
-// GESTION DES QUÊTES
-// ==============================================================================
-
-async function runQuestsAll() {
-  const accounts = await fetchAccounts();
-  let processed = 0;
-
-  for (const acc of accounts) {
-    if (!acc.valid) continue;
-    const qRes = await apiReq(acc.token, "GET", "/quests/@me");
-    if (qRes.status !== 200) continue;
-    const quests = Array.isArray(qRes.data) ? qRes.data : qRes.data?.quests || [];
-
-    for (const q of quests) {
-      if (!q?.id || q?.user_status?.completed_at) continue;
-      const body = { location: 11, is_targeted: false };
-      if (q.traffic_metadata_sealed) {
-        body.traffic_metadata_sealed = q.traffic_metadata_sealed;
-      }
-      await apiReq(acc.token, "POST", `/quests/${q.id}/enroll`, body);
-      processed += 1;
-      if (CLAIM_AUTO) {
-        await new Promise((r) => setTimeout(r, 2000));
-        await apiReq(acc.token, "POST", `/quests/${q.id}/claim-reward`, body);
-      }
-    }
-  }
-  return processed;
-}
-
-function buildPanelButtons() {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("baque_accounts")
-        .setLabel("Comptes & Soldes")
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId("baque_add_token")
-        .setLabel("Ajouter un compte")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId("baque_run_quests")
-        .setLabel("Lancer les quêtes")
-        .setStyle(ButtonStyle.Success)
-    ),
-  ];
-}
-
-// ==============================================================================
-// CLIENT DISCORD
-// ==============================================================================
-
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-client.once("ready", async () => {
-  console.log(`✅ ${BOT_NAME} connecté en tant que ${client.user.tag}`);
-  if (process.env.DISCORD_TOKEN && client.application?.id) {
-    const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
-    const commands = [
-      new SlashCommandBuilder()
-        .setName("panel")
-        .setDescription("Affiche le panneau principal de bot-baque"),
-      new SlashCommandBuilder()
-        .setName("help")
-        .setDescription("Affiche l'aide de bot-baque"),
-    ].map((c) => c.toJSON());
-    await rest.put(Routes.applicationCommands(client.application.id), { body: commands });
-  }
-});
-
-client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    if (interaction.commandName === "panel") {
-      await interaction.deferReply();
-      const accounts = await fetchAccounts();
-      const image = await generatePanelImage(accounts);
-      const embed = new EmbedBuilder()
-        .setTitle(`🎛️ ${BOT_NAME} — Panel`)
-        .setColor(0x6d28d9)
-        .setImage("attachment://panel.png");
-      await interaction.editReply({
-        embeds: [embed],
-        files: [image],
-        components: buildPanelButtons(),
-      });
-      return;
-    }
-
-    if (interaction.commandName === "help") {
-      const embed = new EmbedBuilder()
-        .setTitle(`📖 Aide — ${BOT_NAME}`)
-        .setColor(0x3b82f6)
-        .setDescription(
-          [
-            "• **`/panel`** : Affiche le panneau violet/bleu avec les boutons de contrôle.",
-            "• **`/help`** : Affiche cette liste des commandes et boutons.",
-            "• **Bouton `Comptes & Soldes`** : Génère l'image vert/bleu avec le solde des Orbs en haut et les profils des comptes à droite (ou jaune/rouge `AUCUN COMPTE` s'il n'y a pas de compte).",
-            "• **Bouton `Ajouter un compte`** : Ouvre une fenêtre pour ajouter un token dans `tokens_config.json`.",
-            "• **Bouton `Lancer les quêtes`** : Lance l'inscription et la réclamation automatique des quêtes.",
-          ].join("\n")
-        );
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-      return;
-    }
-  }
-
-  if (interaction.isButton()) {
-    if (interaction.customId === "baque_add_token") {
-      const modal = new ModalBuilder()
-        .setCustomId("baque_modal_token")
-        .setTitle("Ajouter un compte");
-      const input = new TextInputBuilder()
-        .setCustomId("token_field")
-        .setLabel("Token Discord")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      await interaction.showModal(modal);
-      return;
-    }
-
-    await interaction.deferUpdate();
-
-    if (interaction.customId === "baque_accounts") {
-      const accounts = await fetchAccounts();
-      const validAccounts = accounts.filter((a) => a.valid);
-      const image = await generateAccountsCardImage(accounts);
-      const embed = new EmbedBuilder()
-        .setTitle(
-          validAccounts.length > 0
-            ? `💰 ${BOT_NAME} — Soldes & Profils`
-            : `⚠️ ${BOT_NAME} — Aucun compte`
-        )
-        .setColor(validAccounts.length > 0 ? 0x10b981 : 0xdc2626)
-        .setImage(`attachment://${image.name}`);
-      await interaction.editReply({
-        embeds: [embed],
-        files: [image],
-        components: buildPanelButtons(),
-      });
-    } else if (interaction.customId === "baque_run_quests") {
-      const processed = await runQuestsAll();
-      const accounts = await fetchAccounts();
-      const image = await generateAccountsCardImage(accounts);
-      const embed = new EmbedBuilder()
-        .setTitle(`🚀 ${BOT_NAME} — Quêtes lancées (${processed})`)
-        .setColor(0x10b981)
-        .setImage(`attachment://${image.name}`);
-      await interaction.editReply({
-        embeds: [embed],
-        files: [image],
-        components: buildPanelButtons(),
-      });
-    }
-  }
-
-  if (interaction.isModalSubmit() && interaction.customId === "baque_modal_token") {
-    await interaction.deferReply({ ephemeral: true });
-    const token = interaction.fields.getTextInputValue("token_field").trim();
-    const cfg = loadConfig();
-    if (!cfg.tokens.includes(token)) {
-      cfg.tokens.push(token);
-      saveConfig(cfg);
-    }
-    await interaction.editReply({ content: "✅ Compte enregistré dans `tokens_config.json`." });
-  }
-});
-
-if (!process.env.DISCORD_TOKEN) {
-  console.error("❌ Variable DISCORD_TOKEN manquante.");
-  process.exit(1);
-}
-
-client.login(process.env.DISCORD_TOKEN);
+import asyncio, base64, json, random, time
+from datetime import datetime, timezone
+import aiohttp
+from colorama import Fore, Style, init
+init(autoreset=True)
+API, CLEAR_SCREEN, CLAIM_AUTO = "https://discord.com/api/v9", True, True
+R, G, C, Y, M, W, X = Fore.RED+Style.BRIGHT, Fore.GREEN+Style.BRIGHT, Fore.CYAN+Style.BRIGHT, Fore.YELLOW+Style.BRIGHT, Fore.MAGENTA+Style.BRIGHT, Fore.WHITE+Style.BRIGHT, Style.RESET_ALL
+SUPER_PROPS = base64.b64encode(json.dumps({"os":"Windows","browser":"Discord Client","release_channel":"stable","client_version":"1.0.9255","os_version":"10.0.19045","os_arch":"x64","system_locale":"fr","client_build_number":382306}).encode()).decode()
+TASKS = ["WATCH_VIDEO", "WATCH_VIDEO_ON_MOBILE", "PLAY_ON_DESKTOP", "PLAY_ACTIVITY"]
+LABEL = {"WATCH_VIDEO":"Vidéo","WATCH_VIDEO_ON_MOBILE":"Vidéo","PLAY_ON_DESKTOP":"Jeu","PLAY_ACTIVITY":"Activité"}
+ICON = {"wait":"⏳","enroll":"📝","run":"▶️ ","done":"🎁","fail":"❌","skip":"⚠️ ","claimed":"✅"}
+END = ("done", "fail", "skip", "claimed")
+LOG, ACCOUNTS = [], {"tokens": [], "pseudo": "Toi"}
+LETTERS = {"A":[" █████╗ ","██╔══██╗","███████║","██╔══██║","██║  ██║","╚═╝  ╚═╝"],"K":["██╗  ██╗","██║ ██╔╝","█████╔╝ ","██╔═██╗ ","██║  ██╗","╚═╝  ╚═╝"],"D":["██████╗ ","██╔══██╗","██║  ██║","██║  ██║","██████╔╝","╚═════╝ "],"T":["████████╗","╚══██╔══╝","   ██║   ","   ██║   ","   ██║   ","   ╚═╝   "]}
+def clear():
+    if CLEAR_SCREEN: print("\033[2J\033[H", end="")
+def banner(pseudo):
+    print()
+    for i in range(6): print(C + "".join(LETTERS[c][i] for c in "AKDT"))
+    for l, t in zip("AKDT", ["AutoCat", pseudo, "Discord", "Token"]): print(f"{M} {l}{W} = {t}")
+    print(f"{C}{'=' * 34}")
+async def ask(loop, prompt): return (await loop.run_in_executor(None, input, f"{C}{prompt}{X}")).strip()
+class Client:
+    def __init__(self, token): self.token, self.user_id, self.username, self.channel = token.strip(), None, "?", None
+    def headers(self): return {"Authorization":self.token,"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9255 Chrome/128.0.6613.186 Electron/32.2.7 Safari/537.36","Content-Type":"application/json","X-Super-Properties":SUPER_PROPS,"X-Discord-Locale":"fr"}
+    async def req(self, s, method, path, body=None):
+        try:
+            async with s.request(method, f"{API}{path}", headers=self.headers(), json=body) as r:
+                try: data = await r.json()
+                except Exception: data = {}
+                if r.status == 429: await asyncio.sleep(5)
+                return r.status, data
+        except Exception: return 0, {}
+    async def post(self, s, path, body):
+        st, d = await self.req(s, "POST", path, body)
+        return d if st == 200 else None
+    async def verify(self, s):
+        st, d = await self.req(s, "GET", "/users/@me")
+        if st == 200: self.user_id, self.username = d["id"], d.get("username", "?")
+        return st == 200
+    async def quests(self, s):
+        st, d = await self.req(s, "GET", "/quests/@me")
+        return (d.get("quests", []) if isinstance(d, dict) else d) if st == 200 else []
+    async def balance(self, s):
+        st, d = await self.req(s, "GET", "/users/@me/virtual-currency/balance")
+        if st != 200: return None
+        if isinstance(d, (int, float)): return int(d)
+        for k in ("balance", "amount", "orbs"):
+            if isinstance(d.get(k), (int, float)): return int(d[k])
+        return None
+    async def dm_channel(self, s):
+        if not self.channel:
+            st, d = await self.req(s, "GET", "/users/@me/channels")
+            if st == 200 and d: self.channel = next((x["id"] for x in d if x.get("type") in (1, 3)), None)
+        return self.channel
+    async def claim(self, s, q):
+        body = {"location": 11, "is_targeted": False}
+        if q.get("sealed"): body["traffic_metadata_sealed"] = q["sealed"]
+        st, d = await self.req(s, "POST", f"/quests/{q['id']}/claim-reward", body)
+        if st == 200: return True, ""
+        if isinstance(d, dict) and d.get("captcha_key"): return False, "captcha requis : réclame à la main"
+        return False, f"refusé ({st})"
+def parse_quest(q):
+    cfg = q.get("config", {})
+    tcfg = cfg.get("task_config_v2") or cfg.get("taskConfigV2") or cfg.get("task_config") or {}
+    st = q.get("user_status") or {}
+    tasks = tcfg.get("tasks", {})
+    task = next((k for k in TASKS if k in tasks), None)
+    info = tasks.get(task, {})
+    apps = info.get("applications") or [{}]
+    return {"id":q["id"],"name":(cfg.get("messages") or {}).get("quest_name") or q["id"],"task":task,"target":float(info.get("target",0)),"app_id":apps[0].get("id"),"enrolled_at":st.get("enrolled_at"),"value":float(((st.get("progress") or {}).get(task) or {}).get("value",0)),"done":bool(st.get("completed_at")),"claimed":bool(st.get("claimed_at")),"expired":cfg.get("expires_at","9999")<time.strftime("%Y-%m-%dT%H:%M:%S"),"sealed":q.get("traffic_metadata_sealed")}
+def to_ts(s):
+    try:
+        s = s.split(".")[0].replace("Z", "").split("+")[0]
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except Exception: return time.time()
+async def fetch_accounts(tokens):
+    async with aiohttp.ClientSession() as s:
+        async def one(t):
+            c = Client(t); ok = await c.verify(s)
+            return c, ok, (await c.balance(s) if ok else None)
+        return await asyncio.gather(*[one(t) for t in tokens])
+def show_balances(res):
+    total = 0
+    for c, ok, b in res:
+        if ok: total += b or 0; print(f"  {W}@{c.username}{X}  {M}{'?' if b is None else b} Orbs")
+        else: print(f"  {R}[token invalide]")
+    if len(res) > 1: print(f"  {W}TOTAL{X}  {M}{total} Orbs")
+async def run_video(c, s, j):
+    enrolled, cur = to_ts(j["enrolled_at"]), j["value"]
+    while cur < j["target"]:
+        if time.time() - enrolled + 10 - cur >= 7:
+            cur = min(j["target"], cur + random.uniform(7.0, 9.5))
+            res = await c.post(s, f"/quests/{j['id']}/video-progress", {"timestamp": round(cur, 6)})
+            j["value"] = cur
+            if res and res.get("completed_at"): return True
+            await asyncio.sleep(random.uniform(7, 9.5))
+        else: await asyncio.sleep(1)
+    await c.post(s, f"/quests/{j['id']}/video-progress", {"timestamp": j["target"]}); return True
+async def run_beats(c, s, j, body):
+    fails = stalls = 0
+    while j["value"] < j["target"]:
+        res = await c.post(s, f"/quests/{j['id']}/heartbeat", body)
+        if res is None:
+            fails += 1; j["note"] = f"heartbeat refusé ({fails}/3)"
+            if fails >= 3: return False
+        else:
+            fails, j["note"] = 0, ""
+            new = float((res.get("progress", {}).get(j["task"]) or {}).get("value", j["value"]))
+            stalls = stalls + 1 if new <= j["value"] else 0
+            j["value"] = max(j["value"], new)
+            if res.get("completed_at"): break
+            if stalls >= 5: j["note"] = "Discord ne crédite rien"; return False
+        await asyncio.sleep(60)
+    body["terminated"] = True; await c.post(s, f"/quests/{j['id']}/heartbeat", body); return True
+async def claim_job(j, s):
+    c = j["client"]; j["note"] = "réclamation..."
+    await asyncio.sleep(random.uniform(3, 6))
+    fresh = next((parse_quest(x) for x in await c.quests(s) if x["id"] == j["id"]), j)
+    ok, msg = await c.claim(s, fresh)
+    j["status"], j["note"] = ("claimed", "") if ok else ("done", msg)
+    LOG.append(f"{'✅' if ok else '⚠️'} {j['name'][:22]} {msg or 'réclamée !'}")
+async def run_job(j, s, start_at):
+    c = j["client"]
+    try:
+        while start_at > time.time():
+            left = start_at - time.time()
+            j["status"], j["note"] = "wait", f"départ dans {int(left // 60)}m{int(left % 60):02d}s"
+            await asyncio.sleep(min(1.0, left))
+        j["note"] = ""
+        if not j["enrolled_at"]:
+            j["status"] = "enroll"; body = {"location": 11, "is_targeted": False}
+            if j["sealed"]: body["traffic_metadata_sealed"] = j["sealed"]
+            res = await c.post(s, f"/quests/{j['id']}/enroll", body)
+            if res is None: j["status"], j["note"] = "fail", "acceptation refusée"; return
+            j["enrolled_at"] = res.get("enrolled_at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        j["status"] = "run"
+        if j["task"].startswith("WATCH"): ok = await run_video(c, s, j)
+        elif j["task"] == "PLAY_ACTIVITY":
+            chan = await c.dm_channel(s)
+            ok = bool(chan and j["app_id"]) and await run_beats(c, s, j, {"stream_key": f"call:{chan}:{c.user_id}", "application_id": j["app_id"], "terminated": False})
+        else: ok = bool(j["app_id"]) and await run_beats(c, s, j, {"application_id": j["app_id"], "terminated": False})
+        if not ok: j["status"] = "fail"; return
+        j["value"], j["status"] = j["target"], "done"
+        if CLAIM_AUTO: await claim_job(j, s)
+    except asyncio.CancelledError: j["status"], j["note"] = "skip", "arrêtée"; raise
+    except Exception as e: j["status"], j["note"] = "fail", str(e)[:28]
+def render(jobs, pseudo, multi):
+    clear(); banner(pseudo)
+    fin = sum(j["status"] in ("done", "claimed") for j in jobs)
+    print(f"{W}📡 DIRECT — {fin}/{len(jobs)} terminée(s)")
+    print()
+    for j in jobs:
+        if j["status"] == "claimed": continue
+        who = f"@{j['client'].username} " if multi else ""
+        p = min(1.0, j["value"] / j["target"]) if j["target"] else 0
+        bar = "█" * int(p * 16) + "░" * (16 - int(p * 16))
+        print(f"{ICON[j['status']]} {W}{who}{j['name'][:24]}{X} ({LABEL[j['task']]})")
+        print(f"   {C}{bar}{X} {int(p * 100)}%  {int(j['value'])}/{int(j['target'])}s")
+        if j["note"]: print(f"   {Y}{j['note']}")
+    for line in LOG[-4:]: print(line)
+async def manage_accounts_button(loop):
+    tokens = ACCOUNTS["tokens"]
+    print(f"\n{M}--- BOUTON GESTION COMPTES ---\n{X}1. Ajouter\n2. Supprimer\n3. Tout vider\n4. Nettoyer invalides")
+    ch = await ask(loop, "Choix ➔ ")
+    if ch == "1":
+        t = await ask(loop, "Token ➔ ")
+        if t: tokens.append(t); print(f"{G}✅ Compte ajouté.")
+    elif ch == "2" and tokens:
+        for i, (c, ok, _) in enumerate(await fetch_accounts(tokens), 1):
+            print(f"[{i}] {G}@{c.username}" if ok else f"[{i}] {R}[Token invalide]")
+        n = await ask(loop, "Numéro ➔ ")
+        if n.isdigit() and 1 <= int(n) <= len(tokens): tokens.pop(int(n) - 1); print(f"{G}🗑️ Compte retiré.")
+    elif ch == "3": tokens.clear(); print(f"{G}🗑️ Tous les comptes retirés.")
+    elif ch == "4":
+        res = await fetch_accounts(tokens)
+        ACCOUNTS["tokens"] = [t for t, (_, ok, _) in zip(tokens, res) if ok]
+        print(f"{G}🧹 {len(ACCOUNTS['tokens'])} compte(s) valide(s).")
+async def main():
+    loop = asyncio.get_running_loop()
+    while True:
+        tokens, pseudo = ACCOUNTS["tokens"], ACCOUNTS["pseudo"]
+        clear(); banner(pseudo)
+        print(f"{Y}💰 Soldes des comptes :")
+        show_balances(await fetch_accounts(tokens) if tokens else [])
+        print(f"\n  {C}1.{X} Lancer quêtes\n  {C}2.{X} Réclamer quêtes finies\n  {C}3.{X} [Bouton] Gestion des comptes\n  {R}0.{X} Quitter")
+        ch = await ask(loop, "\nChoix ➔ ")
+        if ch == "1" and tokens:
+            async with aiohttp.ClientSession() as s:
+                jobs = [dict(q, client=c, status="wait", note="") for t in tokens if (c := Client(t)) and await c.verify(s) for q in (parse_quest(x) for x in await c.quests(s)) if not q["done"] and not q["expired"] and q["task"]]
+                if jobs:
+                    workers = [asyncio.create_task(run_job(j, s, time.time())) for j in jobs]
+                    while not all(j["status"] in END for j in jobs):
+                        render(jobs, pseudo, len(tokens) > 1); await asyncio.sleep(3)
+                    await asyncio.gather(*workers, return_exceptions=True)
+                    await ask(loop, "\nEntrée pour continuer ➔ ")
+        elif ch == "2" and tokens:
+            async with aiohttp.ClientSession() as s:
+                for t in tokens:
+                    c = Client(t)
+                    if await c.verify(s):
+                        for q in (parse_quest(x) for x in await c.quests(s)):
+                            if q["done"] and not q["claimed"]: await c.claim(s, q)
+            await ask(loop, "\nEntrée pour continuer ➔ ")
+        elif ch == "3":
+            await manage_accounts_button(loop); await ask(loop, "\nEntrée pour continuer ➔ ")
+        elif ch == "0": break
+if __name__ == "__main__": asyncio.run(main())
+      
