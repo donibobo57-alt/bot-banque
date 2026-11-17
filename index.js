@@ -1,29 +1,24 @@
-const {
-  Client,
-  GatewayIntentBits,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  EmbedBuilder,
+import fs from "node:fs";
+import path from "node:path";
+import dotenv from "dotenv";
+import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  StringSelectMenuBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  AttachmentBuilder,
-} = require("discord.js");
-const { DatabaseSync } = require("node:sqlite");
-const { createCanvas } = require("@napi-rs/canvas");
-const WebSocket = require("ws");
+  Client,
+  EmbedBuilder,
+  GatewayIntentBits,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+} from "discord.js";
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN || "";
-const CLIENT_ID = process.env.CLIENT_ID || "";
-const YOUTUBE_URL = process.env.YOUTUBE_URL || "https://www.youtube.com/@Kiozi";
+dotenv.config();
 
+const BOT_NAME = "bot-baque";
 const API = "https://discord.com/api/v9";
-const CLAIM_AUTO = true;
+const CONFIG_PATH = path.resolve("tokens_config.json");
+const CLAIM_AUTO = true; // réclame automatiquement chaque quête finie[span_3](start_span)[span_3](end_span)
 
 const SUPER_PROPS = Buffer.from(
   JSON.stringify({
@@ -38,905 +33,209 @@ const SUPER_PROPS = Buffer.from(
   })
 ).toString("base64");
 
-const TASKS = ["WATCH_VIDEO", "WATCH_VIDEO_ON_MOBILE", "PLAY_ON_DESKTOP", "PLAY_ACTIVITY"];
-const LABEL = {
-  WATCH_VIDEO: "Vidéo",
-  WATCH_VIDEO_ON_MOBILE: "Vidéo",
-  PLAY_ON_DESKTOP: "Jeu",
-  PLAY_ACTIVITY: "Activité",
-};
-const ICON = {
-  wait: "⏳",
-  enroll: "📝",
-  run: "▶️",
-  done: "🎁",
-  fail: "❌",
-  skip: "⚠️",
-  claimed: "✅",
-};
-const END_STATUSES = new Set(["done", "fail", "skip", "claimed"]);
-
-const db = new DatabaseSync("auto_quete.sqlite");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    username TEXT,
-    token TEXT NOT NULL UNIQUE
-  );
-`);
-
-const activeSessions = new Map();
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function randRange(min, max) {
-  return min + Math.random() * (max - min);
-}
-
-function getAllAccounts() {
-  return db.prepare("SELECT id, user_id, username, token FROM accounts ORDER BY id ASC").all();
-}
-
-function addAccountRecord(userId, username, token) {
-  db.prepare(
-    `INSERT INTO accounts (user_id, username, token)
-     VALUES (?, ?, ?)
-     ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id, username = excluded.username`
-  ).run(userId, username, token);
-}
-
-function deleteAccountById(id) {
-  db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
-}
-
-function clearAllAccounts() {
-  db.prepare("DELETE FROM accounts").run();
-}
-
-class UserQuestClient {
-  constructor(token, storedId = null, storedName = "?") {
-    this.token = token.trim();
-    this.userId = storedId;
-    this.username = storedName || "?";
-    this.channel = null;
-  }
-
-  headers() {
-    return {
-      Authorization: this.token,
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) discord/1.0.9255 Chrome/128.0.6613.186 " +
-        "Electron/32.2.7 Safari/537.36",
-      "Content-Type": "application/json",
-      "X-Super-Properties": SUPER_PROPS,
-      "X-Discord-Locale": "fr",
-    };
-  }
-
-  async req(method, path, body = null) {
-    try {
-      const opts = { method, headers: this.headers() };
-      if (body !== null && body !== undefined) {
-        opts.body = JSON.stringify(body);
-      }
-      const res = await fetch(`${API}${path}`, opts);
-      let data = {};
-      try {
-        data = await res.json();
-      } catch {
-        data = {};
-      }
-      if (res.status === 429) {
-        await sleep(5000);
-      }
-      return [res.status, data];
-    } catch {
-      return [0, {}];
-    }
-  }
-
-  async post(path, body) {
-    const [st, d] = await this.req("POST", path, body);
-    return st === 200 ? d : null;
-  }
-
-  async verify() {
-    const [st, d] = await this.req("GET", "/users/@me");
-    if (st === 200 && d && d.id) {
-      this.userId = String(d.id);
-      this.username = d.username || "?";
-      return true;
-    }
-    return false;
-  }
-
-  async quests() {
-    const [st, d] = await this.req("GET", "/quests/@me");
-    if (st !== 200) return [];
-    if (Array.isArray(d)) return d;
-    if (d && Array.isArray(d.quests)) return d.quests;
+function loadTokens() {
+  try {
+    if (!fs.existsSync(CONFIG_PATH)) return [];
+    const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    return Array.isArray(raw.tokens) ? raw.tokens.map((t) => String(t).trim()).filter(Boolean) : [];
+  } catch {
     return [];
   }
-
-  async balance() {
-    const [st, d] = await this.req("GET", "/users/@me/virtual-currency/balance");
-    if (st !== 200) return null;
-    if (typeof d === "number") return Math.trunc(d);
-    if (d && typeof d === "object") {
-      for (const k of ["balance", "amount", "orbs"]) {
-        if (typeof d[k] === "number") return Math.trunc(d[k]);
-      }
-    }
-    return null;
-  }
-
-  async dmChannel() {
-    if (!this.channel) {
-      const [st, d] = await this.req("GET", "/users/@me/channels");
-      if (st === 200 && Array.isArray(d)) {
-        const found = d.find((x) => x && (x.type === 1 || x.type === 3));
-        this.channel = found ? found.id : null;
-      }
-    }
-    return this.channel;
-  }
-
-  async claim(q) {
-    const body = { location: 11, is_targeted: false };
-    if (q.sealed) {
-      body.traffic_metadata_sealed = q.sealed;
-    }
-    const [st, d] = await this.req("POST", `/quests/${q.id}/claim-reward`, body);
-    if (st === 200) {
-      return [true, ""];
-    }
-    if (d && typeof d === "object" && d.captcha_key) {
-      return [false, "captcha requis : réclame à la main"];
-    }
-    return [false, `refusé (${st})`];
-  }
 }
 
-function parseQuest(q) {
-  const cfg = q.config || {};
-  const tcfg = cfg.task_config_v2 || cfg.taskConfigV2 || cfg.task_config || {};
-  const st = q.user_status || {};
-  const tasks = tcfg.tasks || {};
-  const task = TASKS.find((k) => Object.prototype.hasOwnProperty.call(tasks, k)) || null;
-  const info = task ? tasks[task] || {} : {};
-  const apps = Array.isArray(info.applications) && info.applications.length ? info.applications : [{}];
-  const progress = st.progress || {};
-  const taskProg = task ? progress[task] || {} : {};
-  const expiresAt = cfg.expires_at || "9999";
-  const nowIso = new Date().toISOString().slice(0, 19);
-
+function userHeaders(token) {
   return {
-    id: q.id,
-    name: (cfg.messages && cfg.messages.quest_name) || q.id,
-    task,
-    target: Number(info.target || 0),
-    app_id: apps[0].id || null,
-    enrolled_at: st.enrolled_at || null,
-    value: Number(taskProg.value || 0),
-    done: Boolean(st.completed_at),
-    claimed: Boolean(st.claimed_at),
-    expired: expiresAt < nowIso,
-    sealed: q.traffic_metadata_sealed || null,
+    Authorization: token.trim(),
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9255 Chrome/128.0.6613.186 Electron/32.2.7 Safari/537.36",
+    "Content-Type": "application/json",
+    "X-Super-Properties": SUPER_PROPS,
+    "X-Discord-Locale": "fr",
   };
 }
 
-function toTs(s) {
+async function apiReq(token, method, endpoint, body = null) {
+  const opts = {
+    method,
+    headers: userHeaders(token),
+  };
+  if (body !== null) {
+    opts.body = JSON.stringify(body);
+  }
+  let res = await fetch(`${API}${endpoint}`, opts);
+  if (res.status === 429) {
+    await new Promise((r) => setTimeout(r, 5000));
+    res = await fetch(`${API}${endpoint}`, opts);
+  }
+  let data = {};
   try {
-    const clean = String(s).split(".")[0].replace("Z", "").split("+")[0];
-    const [datePart, timePart = "00:00:00"] = clean.split("T");
-    const [y, m, d] = datePart.split("-").map(Number);
-    const [hh, mm, ss] = timePart.split(":").map(Number);
-    return Date.UTC(y, m - 1, d, hh, mm, ss) / 1000;
+    data = await res.json();
   } catch {
-    return Date.now() / 1000;
+    data = {};
   }
+  return { status: res.status, data };
 }
 
-async function fetchAccountsData(rows) {
-  return Promise.all(
-    rows.map(async (row) => {
-      const client = new UserQuestClient(row.token, row.user_id, row.username);
-      const ok = await client.verify();
-      if (ok) {
-        addAccountRecord(client.userId, client.username, client.token);
-      }
-      const bal = ok ? await client.balance() : null;
-      return { row, client, ok, bal };
-    })
-  );
+function getAvatarUrl(userId, avatarHash) {
+  if (userId && avatarHash) {
+    return `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.png?size=128`;
+  }
+  const idx = userId && /^\d+$/.test(userId) ? Number((BigInt(userId) >> 22n) % 6n) : 0;
+  return `https://cdn.discordapp.com/embed/avatars/${idx}.png`;
 }
 
-async function generateOrbsBalanceImage(results) {
-  const width = 900;
-  const rowHeight = 58;
-  const headerHeight = 190;
-  const footerHeight = 70;
-  const height = headerHeight + Math.max(1, results.length) * rowHeight + footerHeight;
+async function fetchAccounts() {
+  const tokens = loadTokens();
+  const results = [];
 
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-
-  const bg = ctx.createLinearGradient(0, 0, width, height);
-  bg.addColorStop(0, "#1a0b2e");
-  bg.addColorStop(0.5, "#2b1055");
-  bg.addColorStop(1, "#0f2c59");
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, width, height);
-
-  const glow = ctx.createLinearGradient(0, 0, width, 0);
-  glow.addColorStop(0, "#7b2cbf");
-  glow.addColorStop(1, "#3a86ff");
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, width, 8);
-
-  let total = 0;
-  for (const r of results) {
-    if (r.ok && typeof r.bal === "number") {
-      total += r.bal;
+  for (const token of tokens) {
+    const me = await apiReq(token, "GET", "/users/@me");
+    if (me.status !== 200 || !me.data?.id) {
+      results.push({ valid: false, username: "Token invalide", avatarUrl: null, balance: 0, token });
+      continue;
     }
-  }
-
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 34px Sans";
-  ctx.fillText("Solde Orbs — Comptes Discord", 44, 66);
-
-  ctx.fillStyle = "#c77dff";
-  ctx.font = "bold 42px Sans";
-  ctx.fillText(`Total : ${total.toLocaleString("fr-FR")} Orbs`, 44, 128);
-
-  ctx.fillStyle = "#90e0ef";
-  ctx.font = "20px Sans";
-  ctx.fillText(`Comptes vérifiés : ${results.filter((r) => r.ok).length} / ${results.length}`, 44, 164);
-
-  results.forEach((item, idx) => {
-    const y = headerHeight + idx * rowHeight;
-    ctx.fillStyle = idx % 2 === 0 ? "rgba(255, 255, 255, 0.07)" : "rgba(255, 255, 255, 0.03)";
-    ctx.fillRect(36, y, width - 72, rowHeight - 8);
-
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 22px Sans";
-    const label = item.ok ? `@${item.client.username}` : `[Token invalide #${item.row.id}]`;
-    ctx.fillText(label, 56, y + 34);
-
-    ctx.fillStyle = item.ok ? "#72efdd" : "#ff6b6b";
-    ctx.font = "bold 22px Sans";
-    const rightText = item.ok ? `${item.bal === null ? "?" : item.bal.toLocaleString("fr-FR")} Orbs` : "Invalide";
-    const metrics = ctx.measureText(rightText);
-    ctx.fillText(rightText, width - 56 - metrics.width, y + 34);
-  });
-
-  ctx.fillStyle = "rgba(255, 255, 255, 0.65)";
-  ctx.font = "18px Sans";
-  ctx.fillText("Kiozi créateur", 44, height - 26);
-
-  return canvas.toBuffer("image/png");
-}
-
-async function runVideo(client, job, signal) {
-  const enrolled = toTs(job.enrolled_at);
-  let cur = job.value;
-  while (cur < job.target) {
-    if (signal.aborted) return false;
-    const now = Date.now() / 1000;
-    if (now - enrolled + 10 - cur >= 7) {
-      cur = Math.min(job.target, cur + randRange(7.0, 9.5));
-      const res = await client.post(`/quests/${job.id}/video-progress`, {
-        timestamp: Number(cur.toFixed(6)),
-      });
-      job.value = cur;
-      if (res && res.completed_at) {
-        return true;
-      }
-      await sleep(randRange(7000, 9500));
-    } else {
-      await sleep(1000);
-    }
-  }
-  await client.post(`/quests/${job.id}/video-progress`, { timestamp: job.target });
-  return true;
-}
-
-async function runBeats(client, job, body, signal) {
-  let fails = 0;
-  let stalls = 0;
-  while (job.value < job.target) {
-    if (signal.aborted) return false;
-    const res = await client.post(`/quests/${job.id}/heartbeat`, body);
-    if (res === null) {
-      fails += 1;
-      job.note = `heartbeat refusé (${fails}/3)`;
-      if (fails >= 3) {
-        return false;
-      }
-    } else {
-      fails = 0;
-      job.note = "";
-      const prog = (res.progress && res.progress[job.task]) || {};
-      const nextVal = Number(prog.value !== undefined ? prog.value : job.value);
-      stalls = nextVal <= job.value ? stalls + 1 : 0;
-      job.value = Math.max(job.value, nextVal);
-      if (res.completed_at) {
-        break;
-      }
-      if (stalls >= 5) {
-        job.note = "Discord ne crédite rien";
-        return false;
+    const balRes = await apiReq(token, "GET", "/users/@me/virtual-currency/balance");
+    let balance = 0;
+    if (balRes.status === 200) {
+      if (typeof balRes.data === "number") balance = Math.trunc(balRes.data);
+      else if (balRes.data && typeof balRes.data === "object") {
+        for (const k of ["balance", "amount", "orbs"]) {
+          if (typeof balRes.data[k] === "number") {
+            balance = Math.trunc(balRes.data[k]);
+            break;
+          }
+        }
       }
     }
-    for (let i = 0; i < 60; i++) {
-      if (signal.aborted) return false;
-      await sleep(1000);
-    }
+    results.push({
+      valid: true,
+      userId: me.data.id,
+      username: me.data.username || "?",
+      avatarUrl: getAvatarUrl(me.data.id, me.data.avatar),
+      balance,
+      token,
+    });
   }
-  const endBody = { ...body, terminated: true };
-  await client.post(`/quests/${job.id}/heartbeat`, endBody);
-  return true;
+  return results;
 }
 
-async function runPlay(client, job, signal) {
-  if (!job.app_id) {
-    job.note = "application_id introuvable";
-    return false;
-  }
-  return runBeats(client, job, { application_id: job.app_id, terminated: false }, signal);
-}
+function buildBalancesEmbed(accounts) {
+  const total = accounts.reduce((acc, a) => acc + (a.valid ? a.balance : 0), 0);
 
-async function runActivity(client, job, signal) {
-  const chan = await client.dmChannel();
-  if (!chan || !job.app_id) {
-    job.note = "salon ou application introuvable";
-    return false;
-  }
-  const body = {
-    stream_key: `call:${chan}:${client.userId}`,
-    application_id: job.app_id,
-    terminated: false,
-  };
-  return runBeats(client, job, body, signal);
-}
-
-async function claimJob(job) {
-  const client = job.client;
-  job.note = "réclamation...";
-  await sleep(randRange(3000, 6000));
-  const rawQuests = await client.quests();
-  const found = rawQuests.find((x) => x.id === job.id);
-  const fresh = found ? parseQuest(found) : job;
-  const [ok, msg] = await client.claim(fresh);
-  if (ok) {
-    job.status = "claimed";
-    job.note = "";
-    job.log = `✅ ${String(job.name).slice(0, 22)} réclamée !`;
-  } else {
-    job.status = "done";
-    job.note = msg;
-    job.log = `⚠️ ${String(job.name).slice(0, 22)} : ${msg}`;
-  }
-}
-
-async function runJob(job, signal) {
-  const client = job.client;
-  try {
-    if (signal.aborted) {
-      job.status = "skip";
-      job.note = "arrêtée";
-      return;
-    }
-    job.note = "";
-    if (!job.enrolled_at) {
-      job.status = "enroll";
-      const body = { location: 11, is_targeted: false };
-      if (job.sealed) {
-        body.traffic_metadata_sealed = job.sealed;
-      }
-      const res = await client.post(`/quests/${job.id}/enroll`, body);
-      if (res === null) {
-        job.status = "fail";
-        job.note = "acceptation refusée";
-        return;
-      }
-      job.enrolled_at = res.enrolled_at || new Date().toISOString();
-    }
-    job.status = "run";
-    let ok = false;
-    if (job.task && job.task.startsWith("WATCH")) {
-      ok = await runVideo(client, job, signal);
-    } else if (job.task === "PLAY_ACTIVITY") {
-      ok = await runActivity(client, job, signal);
-    } else {
-      ok = await runPlay(client, job, signal);
-    }
-    if (!ok) {
-      job.status = signal.aborted ? "skip" : "fail";
-      if (signal.aborted) job.note = "arrêtée";
-      return;
-    }
-    job.value = job.target;
-    job.status = "done";
-    if (CLAIM_AUTO) {
-      await claimJob(job);
-    } else {
-      job.note = "à réclamer";
-    }
-  } catch (err) {
-    if (signal.aborted) {
-      job.status = "skip";
-      job.note = "arrêtée";
-    } else {
-      job.status = "fail";
-      job.note = String(err && err.message ? err.message : err).slice(0, 28);
-    }
-  }
-}
-
-function buildQuestProgressEmbed(session) {
-  const fin = session.jobs.filter((j) => j.status === "done" || j.status === "claimed").length;
-  const lines = session.jobs.map((j) => {
-    const who = session.multi ? `@${j.client.username} ` : "";
-    const pct = j.target ? Math.min(1, j.value / j.target) : 0;
-    const filled = Math.floor(pct * 16);
-    const bar = "█".repeat(filled) + "░".repeat(16 - filled);
-    const notePart = j.note ? `\n   ↳ *${j.note}*` : "";
-    return `${ICON[j.status] || "•"} **${who}${String(j.name).slice(0, 24)}** (${LABEL[j.task] || j.task})\n   \`${bar}\` ${Math.floor(pct * 100)}% (${Math.floor(j.value)}/${Math.floor(j.target)}s)${notePart}`;
+  const lines = accounts.map((a, i) => {
+    if (!a.valid) return `❌ Compte #${i + 1} — Token invalide`;
+    return `• **@${a.username}** — **${a.balance} Orbs**`;
   });
 
   const embed = new EmbedBuilder()
-    .setTitle(`📡 Auto-Quête — ${fin}/${session.jobs.length} terminée(s)`)
-    .setColor(session.stopped ? 0xe74c3c : 0x5865f2)
-    .setDescription(lines.join("\n").slice(0, 4000) || "Aucune quête en cours.")
-    .setFooter({ text: session.stopped ? "Arrêté par l'utilisateur • Kiozi créateur" : "Mise à jour en temps réel • Kiozi créateur" });
+    .setTitle(`💰 ${BOT_NAME} — Comptes & Soldes`)
+    .setColor(0x5865f2)
+    .setDescription(lines.length ? lines.join("\n") : "Aucun compte dans `tokens_config.json`.")
+    .addFields({
+      name: "💎 TOTAL DES ORBS",
+      value: `**${total} Orbs**`,
+      inline: false,
+    })
+    .setTimestamp();
 
+  const firstWithAvatar = accounts.find((a) => a.valid && a.avatarUrl);
+  if (firstWithAvatar) {
+    embed.setThumbnail(firstWithAvatar.avatarUrl);
+  }
   return embed;
 }
 
-function buildStopRow(disabled = false) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("quest_stop")
-      .setLabel("Arrêter les quêtes")
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(disabled)
-  );
-}
+async function runQuestsAll() {
+  const accounts = await fetchAccounts();
+  let processed = 0;
 
-function buildHelpEmbed() {
-  return new EmbedBuilder()
-    .setTitle("📖 Aide — Bot Auto-Quête Discord")
-    .setColor(0x7b2cbf)
-    .setDescription(`🎬 **Chaîne YouTube :** ${YOUTUBE_URL}`)
-    .addFields(
-      {
-        name: "1️⃣ Tutoriel applications & récupération de token",
-        value: [
-          "**Applications externes à installer (via Google) :** `PhantomMail` (`Phantom Hub`), `Clone Hub` et `Bluecord APK`.",
-          "⚠️ *Précision importante : ces trois applications ne m'appartiennent pas, ce sont des applications externes.*",
-          "1. Génère une adresse email jetable avec **PhantomMail** (*c'est une adresse email jetable : il n'y aura pas de mot de passe d'accès à cette boîte email*).",
-          "2. Ouvre **Clone Hub**, clone **Discord**, crée un nouveau compte Discord avec cet email et **retiens bien le mot de passe créé**.",
-          "3. Clone **Bluecord** dans **Clone Hub**, puis connecte-toi avec les identifiants du nouveau compte cloné.",
-          "4. Ouvre les **Paramètres Bluecord**, prends la **3ème option en partant du bas**, copie le token, puis ajoute-le dans **Gestion des comptes** du `/panel`.",
-          "5. **Compte principal :** pour récupérer le token de ton propre compte principal, mets simplement ton email et ton mot de passe sur l'application **Bluecord**.",
-        ].join("\n"),
-      },
-      {
-        name: "2️⃣ Gestion des comptes",
-        value:
-          "Dans `/panel` → **Gestion des comptes**, tu peux ajouter un compte (vérifié via `/users/@me` avec enregistrement de l'ID et du pseudo), supprimer un token précis, nettoyer les tokens invalides ou tout supprimer.",
-      },
-      {
-        name: "3️⃣ Solde Orbs",
-        value:
-          "Dans `/panel` → **Solde Orbs**, le bot vérifie chaque compte enregistré, récupère son solde (`/users/@me/virtual-currency/balance`) et génère une image dégradée violet/bleu avec le total et le détail par compte.",
-      },
-      {
-        name: "4️⃣ Gestion Auto-Quête",
-        value:
-          "Dans `/panel` → **Gestion Auto-Quête**, choisis un compte précis ou tous les comptes, lance les quêtes Orbs (`WATCH_VIDEO`, `WATCH_VIDEO_ON_MOBILE`, `PLAY_ON_DESKTOP`, `PLAY_ACTIVITY`) en mode toutes quêtes (acceptation auto) ou uniquement déjà acceptées, suis l'avancement en temps réel et utilise le bouton rouge pour arrêter à tout moment.",
-      },
-      {
-        name: "5️⃣ Gestion Vocale",
-        value:
-          "Système Bluecord : le compte doit **déjà avoir rejoint le serveur** avant de rejoindre en vocal, avec un fonctionnement façon Pydroid 3 / Gateway.",
+  for (const acc of accounts) {
+    if (!acc.valid) continue;
+    const qRes = await apiReq(acc.token, "GET", "/quests/@me");
+    if (qRes.status !== 200) continue;
+    const quests = Array.isArray(qRes.data) ? qRes.data : qRes.data?.quests || [];
+
+    for (const q of quests) {
+      if (!q?.id || q?.user_status?.completed_at) continue;
+      const body = { location: 11, is_targeted: false };
+      if (q.traffic_metadata_sealed) {
+        body.traffic_metadata_sealed = q.traffic_metadata_sealed;
       }
-    )
-    .setFooter({ text: "Kiozi créateur" });
-}
-
-function buildMainPanelEmbed(accountsCount) {
-  return new EmbedBuilder()
-    .setTitle("🎛️ Panneau de contrôle — Auto-Quête")
-    .setColor(0x3a86ff)
-    .setDescription(
-      [
-        `Comptes enregistrés : **${accountsCount}** (minimum 1 requis pour lancer les modules).`,
-        "Sélectionne une action ci-dessous :",
-      ].join("\n")
-    )
-    .setFooter({ text: "Kiozi créateur" });
-}
-
-function buildMainPanelRows() {
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("panel_accounts").setLabel("Gestion des comptes").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId("panel_orbs").setLabel("Solde Orbs").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("panel_quests").setLabel("Gestion Auto-Quête").setStyle(ButtonStyle.Success)
-  );
-  return [row1];
-}
-
-function buildAccountsEmbed(accounts) {
-  const list =
-    accounts.length === 0
-      ? "Aucun compte enregistré."
-      : accounts.map((a) => `• **#${a.id}** — @${a.username || "?"} (\`${a.user_id || "?"}\`)`).join("\n");
-  return new EmbedBuilder()
-    .setTitle("👤 Gestion des comptes (Tokens)")
-    .setColor(0x5865f2)
-    .setDescription(list)
-    .setFooter({ text: "Kiozi créateur" });
-}
-
-function buildAccountsRows(accounts) {
-  const rows = [];
-  rows.push(
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("acc_add").setLabel("Ajouter un compte").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId("acc_clean").setLabel("Nettoyer les invalides").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("acc_delete_all").setLabel("Tout supprimer").setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId("panel_back").setLabel("Retour").setStyle(ButtonStyle.Secondary)
-    )
-  );
-
-  if (accounts.length > 0) {
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId("acc_delete_one")
-      .setPlaceholder("Supprimer un token précis...")
-      .addOptions(
-        accounts.slice(0, 25).map((a) => ({
-          label: `#${a.id} — @${a.username || "?"}`.slice(0, 100),
-          description: `ID: ${a.user_id || "inconnu"}`.slice(0, 100),
-          value: String(a.id),
-        }))
-      );
-    rows.push(new ActionRowBuilder().addComponents(menu));
+      await apiReq(acc.token, "POST", `/quests/${q.id}/enroll`, body);
+      processed += 1;
+      if (CLAIM_AUTO) {
+        await new Promise((r) => setTimeout(r, 2000));
+        await apiReq(acc.token, "POST", `/quests/${q.id}/claim-reward`, body);
+      }
+    }
   }
-
-    return rows;
+  return processed;
 }
 
-const commands = [
-  new SlashCommandBuilder().setName("help").setDescription("Affiche le tutoriel, les liens et le guide du bot"),
-  new SlashCommandBuilder().setName("panel").setDescription("Ouvre le panneau interactif de gestion des comptes, Orbs et quêtes"),
-].map((c) => c.toJSON());
-
-async function registerCommands() {
-  if (!DISCORD_TOKEN || !CLIENT_ID) return;
-  const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+function buildPanelComponents() {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("baque_refresh")
+      .setLabel("Voir les soldes & total")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("baque_run")
+      .setLabel("Lancer les quêtes")
+      .setStyle(ButtonStyle.Success)
+  );
+  return [row];
 }
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once("ready", async () => {
-  await registerCommands();
-  console.log(`Connecté en tant que ${client.user.tag}`);
+  console.log(`✅ ${BOT_NAME} connecté en tant que ${client.user.tag}`);
+  if (process.env.DISCORD_TOKEN && client.application?.id) {
+    const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+    const cmds = [
+      new SlashCommandBuilder()
+        .setName("panel")
+        .setDescription("Affiche le panneau de bot-baque avec les boutons"),
+    ].map((c) => c.toJSON());
+    await rest.put(Routes.applicationCommands(client.application.id), { body: cmds });
+  }
 });
 
 client.on("interactionCreate", async (interaction) => {
-  try {
-    if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === "help") {
-        await interaction.reply({ embeds: [buildHelpEmbed()], ephemeral: true });
-        return;
-      }
-      if (interaction.commandName === "panel") {
-        const accounts = getAllAccounts();
-        await interaction.reply({
-          embeds: [buildMainPanelEmbed(accounts.length)],
-          components: buildMainPanelRows(),
-          ephemeral: true,
-        });
-        return;
-      }
-    }
+  if (interaction.isChatInputCommand() && interaction.commandName === "panel") {
+    await interaction.deferReply();
+    const accounts = await fetchAccounts();
+    await interaction.editReply({
+      embeds: [buildBalancesEmbed(accounts)],
+      components: buildPanelComponents(),
+    });
+    return;
+  }
 
-    if (interaction.isButton()) {
-      const id = interaction.customId;
-
-      if (id === "panel_back") {
-        const accounts = getAllAccounts();
-        await interaction.update({
-          embeds: [buildMainPanelEmbed(accounts.length)],
-          components: buildMainPanelRows(),
-        });
-        return;
-      }
-
-      if (id === "panel_accounts") {
-        const accounts = getAllAccounts();
-        await interaction.update({
-          embeds: [buildAccountsEmbed(accounts)],
-          components: buildAccountsRows(accounts),
-        });
-        return;
-      }
-
-      if (id === "acc_add") {
-        const modal = new ModalBuilder().setCustomId("modal_add_token").setTitle("Ajouter un compte (Token)");
-        const input = new TextInputBuilder()
-          .setCustomId("token_input")
-          .setLabel("Token Discord")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(true);
-        modal.addComponents(new ActionRowBuilder().addComponents(input));
-        await interaction.showModal(modal);
-        return;
-      }
-
-      if (id === "acc_clean") {
-        await interaction.deferUpdate();
-        const rows = getAllAccounts();
-        const results = await fetchAccountsData(rows);
-        let removed = 0;
-        for (const r of results) {
-          if (!r.ok) {
-            deleteAccountById(r.row.id);
-            removed += 1;
-          }
-        }
-        const updated = getAllAccounts();
-        await interaction.editReply({
-          content: `🧹 Nettoyage terminé : ${removed} token(s) invalide(s) supprimé(s).`,
-          embeds: [buildAccountsEmbed(updated)],
-          components: buildAccountsRows(updated),
-        });
-        return;
-      }
-
-      if (id === "acc_delete_all") {
-        clearAllAccounts();
-        const updated = getAllAccounts();
-        await interaction.update({
-          content: "🗑️ Tous les comptes ont été supprimés.",
-          embeds: [buildAccountsEmbed(updated)],
-          components: buildAccountsRows(updated),
-        });
-        return;
-      }
-
-      if (id === "panel_orbs") {
-        const rows = getAllAccounts();
-        if (rows.length === 0) {
-          await interaction.reply({
-            content: "❌ Aucun compte enregistré. Ajoute au moins 1 compte dans Gestion des comptes.",
-            ephemeral: true,
-          });
-          return;
-        }
-        await interaction.deferReply({ ephemeral: true });
-        const results = await fetchAccountsData(rows);
-        const pngBuffer = await generateOrbsBalanceImage(results);
-        const attachment = new AttachmentBuilder(pngBuffer, { name: "solde-orbs.png" });
-        await interaction.editReply({
-          content: "💜💙 Solde Orbs généré :",
-          files: [attachment],
-        });
-        return;
-      }
-
-      if (id === "panel_quests") {
-        const rows = getAllAccounts();
-        if (rows.length === 0) {
-          await interaction.reply({
-            content: "❌ Aucun compte enregistré. Ajoute au moins 1 compte dans Gestion des comptes.",
-            ephemeral: true,
-          });
-          return;
-        }
-
-        const accSelect = new StringSelectMenuBuilder()
-          .setCustomId("quest_pick_account")
-          .setPlaceholder("Choisir un compte ou tous les comptes")
-          .addOptions([
-            { label: `Tous les comptes (${rows.length})`, value: "ALL" },
-            ...rows.slice(0, 24).map((r) => ({
-              label: `@${r.username || "?"} (#${r.id})`.slice(0, 100),
-              value: String(r.id),
-            })),
-          ]);
-
-        const modeSelect = new StringSelectMenuBuilder()
-          .setCustomId("quest_pick_mode")
-          .setPlaceholder("Choisir le mode de lancement")
-          .addOptions([
-            {
-              label: "Toutes les quêtes (acceptation auto)",
-              value: "ALL_ENROLL",
-            },
-            {
-              label: "Uniquement les quêtes déjà acceptées",
-              value: "ENROLLED_ONLY",
-            },
-          ]);
-
-        await interaction.update({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle("🎯 Gestion Auto-Quête")
-              .setColor(0x2ecc71)
-              .setDescription("Sélectionne le(s) compte(s) puis le mode de lancement :")
-              .setFooter({ text: "Kiozi créateur" }),
-          ],
-          components: [
-            new ActionRowBuilder().addComponents(accSelect),
-            new ActionRowBuilder().addComponents(modeSelect),
-            new ActionRowBuilder().addComponents(
-              new ButtonBuilder().setCustomId("panel_back").setLabel("Retour").setStyle(ButtonStyle.Secondary)
-            ),
-          ],
-        });
-        return;
-      }
-
-      if (id === "quest_stop") {
-        const session = activeSessions.get(interaction.user.id);
-        if (!session) {
-          await interaction.reply({ content: "Aucune session Auto-Quête active.", ephemeral: true });
-          return;
-        }
-        session.stopped = true;
-        session.controller.abort();
-        await interaction.update({
-          embeds: [buildQuestProgressEmbed(session)],
-          components: [buildStopRow(true)],
-        });
-        activeSessions.delete(interaction.user.id);
-        return;
-      }
-    }
-
-    if (interaction.isStringSelectMenu()) {
-      if (interaction.customId === "acc_delete_one") {
-        const targetId = Number(interaction.values[0]);
-        deleteAccountById(targetId);
-        const updated = getAllAccounts();
-        await interaction.update({
-          content: `🗑️ Compte #${targetId} supprimé.`,
-          embeds: [buildAccountsEmbed(updated)],
-          components: buildAccountsRows(updated),
-        });
-        return;
-      }
-
-      if (interaction.customId === "quest_pick_account" || interaction.customId === "quest_pick_mode") {
-        const draft = activeSessions.get(`draft_${interaction.user.id}`) || {
-          accountChoice: "ALL",
-          modeChoice: "ALL_ENROLL",
-        };
-        if (interaction.customId === "quest_pick_account") {
-          draft.accountChoice = interaction.values[0];
-        } else {
-          draft.modeChoice = interaction.values[0];
-        }
-        activeSessions.set(`draft_${interaction.user.id}`, draft);
-
-        const rows = getAllAccounts();
-        const selectedRows =
-          draft.accountChoice === "ALL"
-            ? rows
-            : rows.filter((r) => String(r.id) === draft.accountChoice);
-
-        if (selectedRows.length === 0) {
-          await interaction.reply({ content: "❌ Compte introuvable.", ephemeral: true });
-          return;
-        }
-
-        await interaction.deferReply({ ephemeral: true });
-
-        const allowEnroll = draft.modeChoice === "ALL_ENROLL";
-        const jobs = [];
-        for (const row of selectedRows) {
-          const uClient = new UserQuestClient(row.token, row.user_id, row.username);
-          const ok = await uClient.verify();
-          if (!ok) continue;
-          addAccountRecord(uClient.userId, uClient.username, uClient.token);
-          const rawQuests = await uClient.quests();
-          const parsed = rawQuests.map(parseQuest);
-          for (const q of parsed) {
-            if (q.done || q.expired || !q.task) continue;
-            if (!q.enrolled_at && !allowEnroll) continue;
-            jobs.push({
-              ...q,
-              client: uClient,
-              status: "wait",
-              note: "",
-            });
-          }
-        }
-
-        if (jobs.length === 0) {
-          await interaction.editReply({
-            content: "❌ Aucune quête éligible à lancer pour cette sélection.",
-          });
-          return;
-        }
-
-        const controller = new AbortController();
-        const session = {
-          jobs,
-          multi: selectedRows.length > 1,
-          stopped: false,
-          controller,
-        };
-        activeSessions.set(interaction.user.id, session);
-
-        await interaction.editReply({
-          embeds: [buildQuestProgressEmbed(session)],
-          components: [buildStopRow(false)],
-        });
-
-        const workers = jobs.map((j) => runJob(j, controller.signal));
-
-        const updater = setInterval(async () => {
-          try {
-            await interaction.editReply({
-              embeds: [buildQuestProgressEmbed(session)],
-              components: [buildStopRow(session.stopped)],
-            });
-          } catch {
-            // Ignorer si l'interaction a expiré
-          }
-        }, 3000);
-
-        await Promise.allSettled(workers);
-        clearInterval(updater);
-        session.stopped = session.stopped || controller.signal.aborted;
-        activeSessions.delete(interaction.user.id);
-
-        try {
-          await interaction.editReply({
-            embeds: [buildQuestProgressEmbed(session)],
-            components: [buildStopRow(true)],
-          });
-        } catch {
-          // Ignorer si l'interaction a expiré
-        }
-        return;
-      }
-    }
-
-    if (interaction.isModalSubmit() && interaction.customId === "modal_add_token") {
-      const token = interaction.fields.getTextInputValue("token_input").trim();
-      await interaction.deferReply({ ephemeral: true });
-      const uClient = new UserQuestClient(token);
-      const ok = await uClient.verify();
-      if (!ok) {
-        await interaction.editReply({ content: "❌ Token invalide (vérification `/users/@me` échouée)." });
-        return;
-      }
-      addAccountRecord(uClient.userId, uClient.username, uClient.token);
+  if (interaction.isButton()) {
+    await interaction.deferUpdate();
+    if (interaction.customId === "baque_refresh") {
+      const accounts = await fetchAccounts();
       await interaction.editReply({
-        content: `✅ Compte ajouté : **@${uClient.username}** (ID: \`${uClient.userId}\`).`,
+        embeds: [buildBalancesEmbed(accounts)],
+        components: buildPanelComponents(),
+      });
+    } else if (interaction.customId === "baque_run") {
+      const count = await runQuestsAll();
+      const accounts = await fetchAccounts();
+      await interaction.editReply({
+        content: `✅ Traitement terminé (${count} quête(s) traitée(s)).`,
+        embeds: [buildBalancesEmbed(accounts)],
+        components: buildPanelComponents(),
       });
     }
-  } catch (err) {
-    console.error("Erreur interaction:", err);
   }
 });
 
-if (DISCORD_TOKEN) {
-  client.login(DISCORD_TOKEN);
-} else {
-  console.log("Définis DISCORD_TOKEN et CLIENT_ID pour démarrer le bot.");
+if (!process.env.DISCORD_TOKEN) {
+  console.error("❌ Variable DISCORD_TOKEN manquante.");
+  process.exit(1);
 }
 
+client.login(process.env.DISCORD_TOKEN);
+      
