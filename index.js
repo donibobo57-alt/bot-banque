@@ -216,7 +216,7 @@ function parseQuest(q) {
 
   return {
     id: q.id,
-    name: ((cfg.messages && cfg.messages.quest_name) || q.id),
+    name: (cfg.messages && cfg.messages.quest_name) || q.id,
     task,
     target: Number(info.target || 0),
     app_id: apps[0].id || null,
@@ -609,4 +609,334 @@ function buildAccountsRows(accounts) {
     rows.push(new ActionRowBuilder().addComponents(menu));
   }
 
-    return rows;                                                                                                                                                                 }
+    return rows;
+}
+
+const commands = [
+  new SlashCommandBuilder().setName("help").setDescription("Affiche le tutoriel, les liens et le guide du bot"),
+  new SlashCommandBuilder().setName("panel").setDescription("Ouvre le panneau interactif de gestion des comptes, Orbs et quêtes"),
+].map((c) => c.toJSON());
+
+async function registerCommands() {
+  if (!DISCORD_TOKEN || !CLIENT_ID) return;
+  const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+}
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
+
+client.once("ready", async () => {
+  await registerCommands();
+  console.log(`Connecté en tant que ${client.user.tag}`);
+});
+
+client.on("interactionCreate", async (interaction) => {
+  try {
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === "help") {
+        await interaction.reply({ embeds: [buildHelpEmbed()], ephemeral: true });
+        return;
+      }
+      if (interaction.commandName === "panel") {
+        const accounts = getAllAccounts();
+        await interaction.reply({
+          embeds: [buildMainPanelEmbed(accounts.length)],
+          components: buildMainPanelRows(),
+          ephemeral: true,
+        });
+        return;
+      }
+    }
+
+    if (interaction.isButton()) {
+      const id = interaction.customId;
+
+      if (id === "panel_back") {
+        const accounts = getAllAccounts();
+        await interaction.update({
+          embeds: [buildMainPanelEmbed(accounts.length)],
+          components: buildMainPanelRows(),
+        });
+        return;
+      }
+
+      if (id === "panel_accounts") {
+        const accounts = getAllAccounts();
+        await interaction.update({
+          embeds: [buildAccountsEmbed(accounts)],
+          components: buildAccountsRows(accounts),
+        });
+        return;
+      }
+
+      if (id === "acc_add") {
+        const modal = new ModalBuilder().setCustomId("modal_add_token").setTitle("Ajouter un compte (Token)");
+        const input = new TextInputBuilder()
+          .setCustomId("token_input")
+          .setLabel("Token Discord")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true);
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (id === "acc_clean") {
+        await interaction.deferUpdate();
+        const rows = getAllAccounts();
+        const results = await fetchAccountsData(rows);
+        let removed = 0;
+        for (const r of results) {
+          if (!r.ok) {
+            deleteAccountById(r.row.id);
+            removed += 1;
+          }
+        }
+        const updated = getAllAccounts();
+        await interaction.editReply({
+          content: `🧹 Nettoyage terminé : ${removed} token(s) invalide(s) supprimé(s).`,
+          embeds: [buildAccountsEmbed(updated)],
+          components: buildAccountsRows(updated),
+        });
+        return;
+      }
+
+      if (id === "acc_delete_all") {
+        clearAllAccounts();
+        const updated = getAllAccounts();
+        await interaction.update({
+          content: "🗑️ Tous les comptes ont été supprimés.",
+          embeds: [buildAccountsEmbed(updated)],
+          components: buildAccountsRows(updated),
+        });
+        return;
+      }
+
+      if (id === "panel_orbs") {
+        const rows = getAllAccounts();
+        if (rows.length === 0) {
+          await interaction.reply({
+            content: "❌ Aucun compte enregistré. Ajoute au moins 1 compte dans Gestion des comptes.",
+            ephemeral: true,
+          });
+          return;
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const results = await fetchAccountsData(rows);
+        const pngBuffer = await generateOrbsBalanceImage(results);
+        const attachment = new AttachmentBuilder(pngBuffer, { name: "solde-orbs.png" });
+        await interaction.editReply({
+          content: "💜💙 Solde Orbs généré :",
+          files: [attachment],
+        });
+        return;
+      }
+
+      if (id === "panel_quests") {
+        const rows = getAllAccounts();
+        if (rows.length === 0) {
+          await interaction.reply({
+            content: "❌ Aucun compte enregistré. Ajoute au moins 1 compte dans Gestion des comptes.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const accSelect = new StringSelectMenuBuilder()
+          .setCustomId("quest_pick_account")
+          .setPlaceholder("Choisir un compte ou tous les comptes")
+          .addOptions([
+            { label: `Tous les comptes (${rows.length})`, value: "ALL" },
+            ...rows.slice(0, 24).map((r) => ({
+              label: `@${r.username || "?"} (#${r.id})`.slice(0, 100),
+              value: String(r.id),
+            })),
+          ]);
+
+        const modeSelect = new StringSelectMenuBuilder()
+          .setCustomId("quest_pick_mode")
+          .setPlaceholder("Choisir le mode de lancement")
+          .addOptions([
+            {
+              label: "Toutes les quêtes (acceptation auto)",
+              value: "ALL_ENROLL",
+            },
+            {
+              label: "Uniquement les quêtes déjà acceptées",
+              value: "ENROLLED_ONLY",
+            },
+          ]);
+
+        await interaction.update({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("🎯 Gestion Auto-Quête")
+              .setColor(0x2ecc71)
+              .setDescription("Sélectionne le(s) compte(s) puis le mode de lancement :")
+              .setFooter({ text: "Kiozi créateur" }),
+          ],
+          components: [
+            new ActionRowBuilder().addComponents(accSelect),
+            new ActionRowBuilder().addComponents(modeSelect),
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId("panel_back").setLabel("Retour").setStyle(ButtonStyle.Secondary)
+            ),
+          ],
+        });
+        return;
+      }
+
+      if (id === "quest_stop") {
+        const session = activeSessions.get(interaction.user.id);
+        if (!session) {
+          await interaction.reply({ content: "Aucune session Auto-Quête active.", ephemeral: true });
+          return;
+        }
+        session.stopped = true;
+        session.controller.abort();
+        await interaction.update({
+          embeds: [buildQuestProgressEmbed(session)],
+          components: [buildStopRow(true)],
+        });
+        activeSessions.delete(interaction.user.id);
+        return;
+      }
+    }
+
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId === "acc_delete_one") {
+        const targetId = Number(interaction.values[0]);
+        deleteAccountById(targetId);
+        const updated = getAllAccounts();
+        await interaction.update({
+          content: `🗑️ Compte #${targetId} supprimé.`,
+          embeds: [buildAccountsEmbed(updated)],
+          components: buildAccountsRows(updated),
+        });
+        return;
+      }
+
+      if (interaction.customId === "quest_pick_account" || interaction.customId === "quest_pick_mode") {
+        const draft = activeSessions.get(`draft_${interaction.user.id}`) || {
+          accountChoice: "ALL",
+          modeChoice: "ALL_ENROLL",
+        };
+        if (interaction.customId === "quest_pick_account") {
+          draft.accountChoice = interaction.values[0];
+        } else {
+          draft.modeChoice = interaction.values[0];
+        }
+        activeSessions.set(`draft_${interaction.user.id}`, draft);
+
+        const rows = getAllAccounts();
+        const selectedRows =
+          draft.accountChoice === "ALL"
+            ? rows
+            : rows.filter((r) => String(r.id) === draft.accountChoice);
+
+        if (selectedRows.length === 0) {
+          await interaction.reply({ content: "❌ Compte introuvable.", ephemeral: true });
+          return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const allowEnroll = draft.modeChoice === "ALL_ENROLL";
+        const jobs = [];
+        for (const row of selectedRows) {
+          const uClient = new UserQuestClient(row.token, row.user_id, row.username);
+          const ok = await uClient.verify();
+          if (!ok) continue;
+          addAccountRecord(uClient.userId, uClient.username, uClient.token);
+          const rawQuests = await uClient.quests();
+          const parsed = rawQuests.map(parseQuest);
+          for (const q of parsed) {
+            if (q.done || q.expired || !q.task) continue;
+            if (!q.enrolled_at && !allowEnroll) continue;
+            jobs.push({
+              ...q,
+              client: uClient,
+              status: "wait",
+              note: "",
+            });
+          }
+        }
+
+        if (jobs.length === 0) {
+          await interaction.editReply({
+            content: "❌ Aucune quête éligible à lancer pour cette sélection.",
+          });
+          return;
+        }
+
+        const controller = new AbortController();
+        const session = {
+          jobs,
+          multi: selectedRows.length > 1,
+          stopped: false,
+          controller,
+        };
+        activeSessions.set(interaction.user.id, session);
+
+        await interaction.editReply({
+          embeds: [buildQuestProgressEmbed(session)],
+          components: [buildStopRow(false)],
+        });
+
+        const workers = jobs.map((j) => runJob(j, controller.signal));
+
+        const updater = setInterval(async () => {
+          try {
+            await interaction.editReply({
+              embeds: [buildQuestProgressEmbed(session)],
+              components: [buildStopRow(session.stopped)],
+            });
+          } catch {
+            // Ignorer si l'interaction a expiré
+          }
+        }, 3000);
+
+        await Promise.allSettled(workers);
+        clearInterval(updater);
+        session.stopped = session.stopped || controller.signal.aborted;
+        activeSessions.delete(interaction.user.id);
+
+        try {
+          await interaction.editReply({
+            embeds: [buildQuestProgressEmbed(session)],
+            components: [buildStopRow(true)],
+          });
+        } catch {
+          // Ignorer si l'interaction a expiré
+        }
+        return;
+      }
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === "modal_add_token") {
+      const token = interaction.fields.getTextInputValue("token_input").trim();
+      await interaction.deferReply({ ephemeral: true });
+      const uClient = new UserQuestClient(token);
+      const ok = await uClient.verify();
+      if (!ok) {
+        await interaction.editReply({ content: "❌ Token invalide (vérification `/users/@me` échouée)." });
+        return;
+      }
+      addAccountRecord(uClient.userId, uClient.username, uClient.token);
+      await interaction.editReply({
+        content: `✅ Compte ajouté : **@${uClient.username}** (ID: \`${uClient.userId}\`).`,
+      });
+    }
+  } catch (err) {
+    console.error("Erreur interaction:", err);
+  }
+});
+
+if (DISCORD_TOKEN) {
+  client.login(DISCORD_TOKEN);
+} else {
+  console.log("Définis DISCORD_TOKEN et CLIENT_ID pour démarrer le bot.");
+}
+
