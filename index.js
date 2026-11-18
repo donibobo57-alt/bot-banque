@@ -1,478 +1,117 @@
-import fs from "node:fs";
-import path from "node:path";
-import dotenv from "dotenv";
-import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
+// npm i discord.js @napi-rs/canvas
+// Place ton image de fond à côté de ce fichier sous le nom banner.png
+// Active "Server Members Intent" dans le portail développeur Discord.
+
+const {
   Client,
-  EmbedBuilder,
   GatewayIntentBits,
-  ModalBuilder,
-  REST,
-  Routes,
   SlashCommandBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-} from "discord.js";
+  PermissionFlagsBits,
+  AttachmentBuilder,
+} = require('discord.js');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const fs = require('fs');
 
-dotenv.config();
+const TOKEN = 'TON_TOKEN';
+const CONFIG_FILE = './config.json';
 
-const BOT_NAME = "bot-baque";
-const API = "https://discord.com/api/v9";
-const CONFIG_PATH = path.resolve("tokens_config.json");
-const CLAIM_AUTO = true;
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+});
 
-const SUPER_PROPS = Buffer.from(
-  JSON.stringify({
-    os: "Windows",
-    browser: "Discord Client",
-    release_channel: "stable",
-    client_version: "1.0.9255",
-    os_version: "10.0.19045",
-    os_arch: "x64",
-    system_locale: "fr",
-    client_build_number: 382306,
-  })
-).toString("base64");
+// Sauvegarde des salons : un seul salon par type et par serveur
+const load = () =>
+  fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE)) : {};
+const save = (data) => fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2));
 
-function loadTokens() {
-  try {
-    if (!fs.existsSync(CONFIG_PATH)) return [];
-    const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-    return Array.isArray(raw.tokens) ? raw.tokens.map((t) => String(t).trim()).filter(Boolean) : [];
-  } catch {
-    return [];
-  }
+const commands = [
+  new SlashCommandBuilder()
+    .setName('join-membre')
+    .setDescription('Définit ce salon pour les messages de bienvenue')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
+    .setName('join-boost')
+    .setDescription('Définit ce salon pour les messages de boost')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+].map((c) => c.toJSON());
+
+// Génération de la bannière avec la photo de profil au centre
+async function makeBanner(user) {
+  const W = 1280;
+  const H = 720;
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+
+  ctx.drawImage(await loadImage('./banner.png'), 0, 0, W, H);
+
+  const avatar = await loadImage(user.displayAvatarURL({ extension: 'png', size: 512 }));
+  const x = W / 2;
+  const y = H / 2;
+  const r = 130;
+
+  ctx.beginPath();
+  ctx.arc(x, y, r + 10, 0, Math.PI * 2);
+  ctx.fillStyle = '#000000';
+  ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(avatar, x - r, y - r, r * 2, r * 2);
+  ctx.restore();
+
+  return new AttachmentBuilder(await canvas.encode('png'), { name: 'banner.png' });
 }
 
-function saveTokens(tokens) {
-  const clean = tokens.map((t) => String(t).trim()).filter(Boolean);
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify({ tokens: clean }, null, 2), "utf8");
+async function send(guild, type, member, content) {
+  const channelId = load()[guild.id]?.[type];
+  const channel = channelId && guild.channels.cache.get(channelId);
+  if (!channel) return;
+  const files = [await makeBanner(member.user)];
+  channel.send({ content, files }).catch(console.error);
 }
 
-function userHeaders(token) {
-  return {
-    Authorization: token.trim(),
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9255 Chrome/128.0.6613.186 Electron/32.2.7 Safari/537.36",
-    "Content-Type": "application/json",
-    "X-Super-Properties": SUPER_PROPS,
-    "X-Discord-Locale": "fr",
-  };
-}
+client.once('clientReady', async () => {
+  await client.application.commands.set(commands);
+  console.log(`Connecté en tant que ${client.user.tag}`);
+});
 
-async function apiReq(token, method, endpoint, body = null) {
-  const opts = {
-    method,
-    headers: userHeaders(token),
-  };
-  if (body !== null) {
-    opts.body = JSON.stringify(body);
-  }
-  let res = await fetch(`${API}${endpoint}`, opts);
-  if (res.status === 429) {
-    await new Promise((r) => setTimeout(r, 5000));
-    res = await fetch(`${API}${endpoint}`, opts);
-  }
-  let data = {};
-  try {
-    data = await res.json();
-  } catch {
-    data = {};
-  }
-  return { status: res.status, data };
-}
-
-function getAvatarUrl(userId, avatarHash) {
-  if (userId && avatarHash) {
-    return `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.png?size=128`;
-  }
-  const idx = userId && /^\d+$/.test(userId) ? Number((BigInt(userId) >> 22n) % 6n) : 0;
-  return `https://cdn.discordapp.com/embed/avatars/${idx}.png`;
-}
-
-async function fetchAccounts() {
-  const tokens = loadTokens();
-  const results = [];
-
-  for (const token of tokens) {
-    const me = await apiReq(token, "GET", "/users/@me");
-    if (me.status !== 200 || !me.data?.id) {
-      results.push({ valid: false, username: "Token invalide", avatarUrl: null, balance: 0, token });
-      continue;
-    }
-    const balRes = await apiReq(token, "GET", "/users/@me/virtual-currency/balance");
-    let balance = 0;
-    if (balRes.status === 200) {
-      if (typeof balRes.data === "number") balance = Math.trunc(balRes.data);
-      else if (balRes.data && typeof balRes.data === "object") {
-        for (const k of ["balance", "amount", "orbs"]) {
-          if (typeof balRes.data[k] === "number") {
-            balance = Math.trunc(balRes.data[k]);
-            break;
-          }
-        }
-      }
-    }
-    results.push({
-      valid: true,
-      userId: me.data.id,
-      username: me.data.username || "?",
-      avatarUrl: getAvatarUrl(me.data.id, me.data.avatar),
-      balance,
-      token,
-    });
-  }
-  return results;
-}
-
-function parseQuestsList(raw) {
-  const list = Array.isArray(raw) ? raw : raw?.quests || [];
-  return list.map((q) => {
-    const cfg = q?.config || {};
-    const name = cfg?.messages?.quest_name || q?.id || "Quête";
-    const st = q?.user_status || {};
-    const status = st?.claimed_at
-      ? "Réclamée"
-      : st?.completed_at
-      ? "Terminée"
-      : st?.enrolled_at
-      ? "En cours"
-      : "Disponible";
-    return {
-      id: q?.id,
-      name,
-      status,
-    };
+client.on('interactionCreate', async (i) => {
+  if (!i.isChatInputCommand()) return;
+  const type = i.commandName === 'join-membre' ? 'welcome' : 'boost';
+  const data = load();
+  data[i.guildId] = { ...data[i.guildId], [type]: i.channelId };
+  save(data);
+  await i.reply({
+    content:
+      type === 'welcome'
+        ? 'Les messages de bienvenue seront envoyés dans ce salon.'
+        : 'Les messages de boost seront envoyés dans ce salon.',
+    ephemeral: true,
   });
-}
+});
 
-async function scanAllQuests() {
-  const accounts = await fetchAccounts();
-  const scanned = [];
-
-  for (let i = 0; i < accounts.length; i++) {
-    const acc = accounts[i];
-    if (!acc.valid) continue;
-    const qRes = await apiReq(acc.token, "GET", "/quests/@me");
-    const quests = qRes.status === 200 ? parseQuestsList(qRes.data) : [];
-    scanned.push({
-      index: i,
-      username: acc.username,
-      userId: acc.userId,
-      quests,
-    });
-  }
-  return scanned;
-}
-
-function buildBalancesEmbed(accounts) {
-  const total = accounts.reduce((acc, a) => acc + (a.valid ? a.balance : 0), 0);
-
-  const lines = accounts.map((a, i) => {
-    if (!a.valid) return `❌ Compte #${i + 1} — Token invalide`;
-    return `• **@${a.username}** — **${a.balance} Orbs**`;
-  });
-
-  const embed = new EmbedBuilder()
-    .setTitle(`💰 ${BOT_NAME} — Comptes & Soldes`)
-    .setColor(0x5865f2)
-    .setDescription(lines.length ? lines.join("\n") : "Aucun compte dans `tokens_config.json`.")
-    .addFields({
-      name: "💎 TOTAL DES ORBS",
-      value: `**${total} Orbs**`,
-      inline: false,
-    })
-    .setTimestamp();
-
-  const firstWithAvatar = accounts.find((a) => a.valid && a.avatarUrl);
-  if (firstWithAvatar) {
-    embed.setThumbnail(firstWithAvatar.avatarUrl);
-  }
-  return embed;
-}
-
-function buildAccountsManageEmbed(accounts) {
-  const lines = accounts.map((a, i) => {
-    if (!a.valid) return `#${i + 1} — ❌ Token invalide`;
-    return `#${i + 1} — **@${a.username}** (${a.userId})`;
-  });
-
-  return new EmbedBuilder()
-    .setTitle(`👤 ${BOT_NAME} — Gestion des comptes`)
-    .setColor(0x5865f2)
-    .setDescription(lines.length ? lines.join("\n") : "Aucun compte enregistré.")
-    .setTimestamp();
-}
-
-function buildScanEmbed(scanned) {
-  if (!scanned.length) {
-    return new EmbedBuilder()
-      .setTitle(`🔍 ${BOT_NAME} — Scan des quêtes`)
-      .setColor(0x5865f2)
-      .setDescription("Aucun compte valide à scanner.")
-      .setTimestamp();
-  }
-
-  const lines = scanned.map(
-    (s) => `• **@${s.username}** — **${s.quests.length}** quête(s) détectée(s)`
+// Nouveau membre
+client.on('guildMemberAdd', (member) => {
+  send(
+    member.guild,
+    'welcome',
+    member,
+    `Bienvenue ${member} sur **${member.guild.name}**. Nous sommes ravis de t'accueillir parmi nous.`
   );
+});
 
-  return new EmbedBuilder()
-    .setTitle(`🔍 ${BOT_NAME} — Scan des quêtes`)
-    .setColor(0x5865f2)
-    .setDescription(lines.join("\n"))
-    .setFooter({ text: "Clique sur un bouton de compte pour voir ses quêtes" })
-    .setTimestamp();
-}
-
-function buildAccountQuestsEmbed(entry) {
-  const lines = entry.quests.length
-    ? entry.quests.map((q, idx) => `${idx + 1}. **${q.name}** — *${q.status}*`)
-    : ["Aucune quête sur ce compte."];
-
-  return new EmbedBuilder()
-    .setTitle(`📜 Quêtes de @${entry.username}`)
-    .setColor(0x5865f2)
-    .setDescription(lines.join("\n"))
-    .setTimestamp();
-}
-
-async function runQuestsAll() {
-  const accounts = await fetchAccounts();
-  let processed = 0;
-
-  for (const acc of accounts) {
-    if (!acc.valid) continue;
-    const qRes = await apiReq(acc.token, "GET", "/quests/@me");
-    if (qRes.status !== 200) continue;
-    const quests = Array.isArray(qRes.data) ? qRes.data : qRes.data?.quests || [];
-
-    for (const q of quests) {
-      if (!q?.id || q?.user_status?.completed_at) continue;
-      const body = { location: 11, is_targeted: false };
-      if (q.traffic_metadata_sealed) {
-        body.traffic_metadata_sealed = q.traffic_metadata_sealed;
-      }
-      await apiReq(acc.token, "POST", `/quests/${q.id}/enroll`, body);
-      processed += 1;
-      if (CLAIM_AUTO) {
-        await new Promise((r) => setTimeout(r, 2000));
-        await apiReq(acc.token, "POST", `/quests/${q.id}/claim-reward`, body);
-      }
-    }
-  }
-  return processed;
-}
-
-function buildPanelComponents() {
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("baque_refresh")
-      .setLabel("Voir les soldes & total")
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId("baque_run")
-      .setLabel("Lancer les quêtes")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId("baque_scan")
-      .setLabel("Scanner les quêtes")
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId("baque_accounts")
-      .setLabel("Gérer les comptes")
-      .setStyle(ButtonStyle.Secondary)
-  );
-  return [row];
-}
-
-function buildScanComponents(scanned) {
-  const rows = [];
-  const accountButtons = scanned.slice(0, 4).map((s) =>
-    new ButtonBuilder()
-      .setCustomId(`baque_scan_acc_${s.index}`)
-      .setLabel(`Quêtes @${s.username} (${s.quests.length})`)
-      .setStyle(ButtonStyle.Primary)
-  );
-  if (accountButtons.length) {
-    rows.push(new ActionRowBuilder().addComponents(accountButtons));
-  }
-  rows.push(
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("baque_back")
-        .setLabel("Retour")
-        .setStyle(ButtonStyle.Secondary)
-    )
-  );
-  return rows;
-}
-
-function buildAccountManageComponents() {
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("baque_acc_add")
-      .setLabel("Ajouter un compte")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId("baque_acc_remove")
-      .setLabel("Retirer un compte")
-      .setStyle(ButtonStyle.Danger),
-    new ButtonBuilder()
-      .setCustomId("baque_acc_clear")
-      .setLabel("Vider les comptes")
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId("baque_back")
-      .setLabel("Retour")
-      .setStyle(ButtonStyle.Primary)
-  );
-  return [row];
-}
-
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-client.once("ready", async () => {
-  console.log(`✅ ${BOT_NAME} connecté en tant que ${client.user.tag}`);
-  if (process.env.DISCORD_TOKEN && client.application?.id) {
-    const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
-    const cmds = [
-      new SlashCommandBuilder()
-        .setName("panel")
-        .setDescription("Affiche le panneau de bot-baque avec les boutons"),
-    ].map((c) => c.toJSON());
-    await rest.put(Routes.applicationCommands(client.application.id), { body: cmds });
+// Nouveau boost
+client.on('guildMemberUpdate', (oldM, newM) => {
+  if (!oldM.premiumSince && newM.premiumSince) {
+    send(
+      newM.guild,
+      'boost',
+      newM,
+      `Merci ${newM} d'avoir boosté **${newM.guild.name}**. Ton soutien compte énormément pour nous.`
+    );
   }
 });
 
-client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand() && interaction.commandName === "panel") {
-    await interaction.deferReply();
-    const accounts = await fetchAccounts();
-    await interaction.editReply({
-      embeds: [buildBalancesEmbed(accounts)],
-      components: buildPanelComponents(),
-    });
-    return;
-  }
-
-  if (interaction.isButton()) {
-    if (interaction.customId === "baque_acc_add") {
-      const modal = new ModalBuilder()
-        .setCustomId("baque_modal_add")
-        .setTitle("Ajouter un compte");
-      const input = new TextInputBuilder()
-        .setCustomId("token_input")
-        .setLabel("Token du compte")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      await interaction.showModal(modal);
-      return;
-    }
-
-    if (interaction.customId === "baque_acc_remove") {
-      const modal = new ModalBuilder()
-        .setCustomId("baque_modal_remove")
-        .setTitle("Retirer un compte");
-      const input = new TextInputBuilder()
-        .setCustomId("index_input")
-        .setLabel("Numéro du compte à retirer (ex: 1)")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      await interaction.showModal(modal);
-      return;
-    }
-
-    await interaction.deferUpdate();
-
-    if (interaction.customId === "baque_refresh") {
-      const accounts = await fetchAccounts();
-      await interaction.editReply({
-        embeds: [buildBalancesEmbed(accounts)],
-        components: buildPanelComponents(),
-      });
-    } else if (interaction.customId === "baque_run") {
-      const count = await runQuestsAll();
-      const accounts = await fetchAccounts();
-      await interaction.editReply({
-        content: `✅ Traitement terminé (${count} quête(s) traitée(s)).`,
-        embeds: [buildBalancesEmbed(accounts)],
-        components: buildPanelComponents(),
-      });
-    } else if (interaction.customId === "baque_scan") {
-      const scanned = await scanAllQuests();
-      await interaction.editReply({
-        embeds: [buildScanEmbed(scanned)],
-        components: buildScanComponents(scanned),
-      });
-    } else if (interaction.customId.startsWith("baque_scan_acc_")) {
-      const targetIdx = Number.parseInt(interaction.customId.replace("baque_scan_acc_", ""), 10);
-      const scanned = await scanAllQuests();
-      const entry = scanned.find((s) => s.index === targetIdx) || {
-        username: "?",
-        quests: [],
-      };
-      await interaction.editReply({
-        embeds: [buildAccountQuestsEmbed(entry)],
-        components: buildScanComponents(scanned),
-      });
-    } else if (interaction.customId === "baque_accounts") {
-      const accounts = await fetchAccounts();
-      await interaction.editReply({
-        embeds: [buildAccountsManageEmbed(accounts)],
-        components: buildAccountManageComponents(),
-      });
-    } else if (interaction.customId === "baque_acc_clear") {
-      saveTokens([]);
-      const accounts = await fetchAccounts();
-      await interaction.editReply({
-        embeds: [buildAccountsManageEmbed(accounts)],
-        components: buildAccountManageComponents(),
-      });
-    } else if (interaction.customId === "baque_back") {
-      const accounts = await fetchAccounts();
-      await interaction.editReply({
-        embeds: [buildBalancesEmbed(accounts)],
-        components: buildPanelComponents(),
-      });
-    }
-    return;
-  }
-
-  if (interaction.isModalSubmit()) {
-    await interaction.deferUpdate();
-    const tokens = loadTokens();
-
-    if (interaction.customId === "baque_modal_add") {
-      const newToken = interaction.fields.getTextInputValue("token_input").trim();
-      if (newToken && !tokens.includes(newToken)) {
-        tokens.push(newToken);
-        saveTokens(tokens);
-      }
-    } else if (interaction.customId === "baque_modal_remove") {
-      const idx = Number.parseInt(interaction.fields.getTextInputValue("index_input").trim(), 10);
-      if (!Number.isNaN(idx) && idx >= 1 && idx <= tokens.length) {
-        tokens.splice(idx - 1, 1);
-        saveTokens(tokens);
-      }
-    }
-
-    const accounts = await fetchAccounts();
-    await interaction.editReply({
-      embeds: [buildAccountsManageEmbed(accounts)],
-      components: buildAccountManageComponents(),
-    });
-  }
-});
-
-if (!process.env.DISCORD_TOKEN) {
-  console.error("❌ Variable DISCORD_TOKEN manquante.");
-  process.exit(1);
-}
-
-client.login(process.env.DISCORD_TOKEN);
-        
+client.login(TOKEN);
