@@ -12,7 +12,7 @@ const {
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const fs = require('fs');
 
-const TOKEN = 'TON_TOKEN';
+const TOKEN = 'MTU3MTk2NTIzOTMwNDM5Njk3MA.G07_1q.oe9InIKIEKoHSfOpUjkoXLmi6sIb4T-8F9ZGJA';
 const CONFIG_FILE = './config.json';
 
 const client = new Client({
