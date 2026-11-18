@@ -12,7 +12,15 @@ const {
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const fs = require('fs');
 
-const TOKEN = 'MTU3MTk2NTIzOTMwNDM5Njk3MA.G07_1q.oe9InIKIEKoHSfOpUjkoXLmi6sIb4T-8F9ZGJA';
+// Le token est lu dans un fichier .env (jamais dans le code)
+try {
+  process.loadEnvFile();
+} catch {}
+const TOKEN = (process.env.TOKEN || '').trim();
+if (!TOKEN) {
+  console.error('Token manquant : crée un fichier .env avec la ligne TOKEN=ton_token');
+  process.exit(1);
+}
 const CONFIG_FILE = './config.json';
 
 const client = new Client({
