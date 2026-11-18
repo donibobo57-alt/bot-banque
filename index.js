@@ -59,7 +59,7 @@ const commands = [
     .setDescription('Définit ce salon pour les messages de boost')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder()
-    .setName('join-membre-4c-2c')
+    .setName('join-membre-4c2c')
     .setDescription('Définit ce salon pour les membres 4C, 3C et 2C (rôle auto + ping)')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map((c) => c.toJSON());
@@ -67,7 +67,7 @@ const commands = [
 const COMMAND_TYPES = {
   'join-membre': { type: 'welcome', msg: 'Les messages de bienvenue seront envoyés dans ce salon.' },
   'join-boost': { type: 'boost', msg: 'Les messages de boost seront envoyés dans ce salon.' },
-  'join-membre-4c-2c': {
+  'join-membre-4c2c': {
     type: 'tag',
     msg: 'Les membres 4C / 3C / 2C seront accueillis dans ce salon (rôle automatique + ping).',
   },
@@ -112,59 +112,69 @@ function drawText(ctx, text, cx, cy, maxWidth, startSize, align = 'center') {
   ctx.strokeText(text, cx, cy);
 }
 
-// ---------- Génération de la carte ----------
+// ---------- Carte profil blanche (commande 4C2C) : style profil Discord ----------
 async function makeCard(user, title, tagLabel) {
   const W = 1000;
-  const H = 560;
-  const BANNER_H = 280;
+  const H = 600;
+  const BANNER_H = 290;
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
+
+  // Coins arrondis sur toute la carte
+  ctx.beginPath();
+  ctx.roundRect(0, 0, W, H, 30);
+  ctx.clip();
 
   // Fond blanc
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, W, H);
 
-  // Bannière en haut
+  // Bannière copiée en haut
   const bannerFile = pickBannerFile();
+  let drawn = false;
   if (bannerFile) {
     try {
       drawCover(ctx, await loadImage(bannerFile), 0, 0, W, BANNER_H);
+      drawn = true;
     } catch (e) {
       console.error('Bannière illisible :', bannerFile, e.message);
-      ctx.fillStyle = '#cccccc';
-      ctx.fillRect(0, 0, W, BANNER_H);
     }
-  } else {
+  }
+  if (!drawn) {
     ctx.fillStyle = '#cccccc';
     ctx.fillRect(0, 0, W, BANNER_H);
   }
 
-  // Titre en haut (sur la bannière)
-  drawText(ctx, title, W / 2, 55, W - 80, 48);
+  // Fondu de la bannière vers le blanc
+  const fade = ctx.createLinearGradient(0, BANNER_H - 110, 0, BANNER_H);
+  fade.addColorStop(0, 'rgba(255,255,255,0)');
+  fade.addColorStop(1, 'rgba(255,255,255,1)');
+  ctx.fillStyle = fade;
+  ctx.fillRect(0, BANNER_H - 110, W, 110);
 
-  // Photo de profil ronde, à cheval entre la bannière et le fond blanc
+  // Titre en haut (sur la bannière)
+  drawText(ctx, title, W / 2, 50, W - 80, 44);
+
+  // Photo de profil ronde à gauche, contour noir fin décollé
   const avatar = await loadImage(
     user.displayAvatarURL({ extension: 'png', size: 512, forceStatic: true })
   );
-  const r = 95;
-  const gap = 12; // espace entre la photo et le contour
+  const r = 90;
+  const gap = 12;
   const ax = 150;
   const ay = BANNER_H;
 
-  // Disque blanc derrière (crée l'espace décollé)
   ctx.beginPath();
   ctx.arc(ax, ay, r + gap + 6, 0, Math.PI * 2);
   ctx.fillStyle = '#ffffff';
   ctx.fill();
 
-  // Contour noir fin, décollé de la photo
   ctx.beginPath();
   ctx.arc(ax, ay, r + gap, 0, Math.PI * 2);
   ctx.lineWidth = 2;
   ctx.strokeStyle = '#000000';
   ctx.stroke();
 
-  // Photo
   ctx.save();
   ctx.beginPath();
   ctx.arc(ax, ay, r, 0, Math.PI * 2);
@@ -172,24 +182,24 @@ async function makeCard(user, title, tagLabel) {
   ctx.drawImage(avatar, ax - r, ay - r, r * 2, r * 2);
   ctx.restore();
 
-  // Petite case blanche avec 4C / 3C / 2C
+  // Petite case blanche à côté de la photo : le rôle (4C / 3C / 2C)
   if (tagLabel) {
-    const bx = 290;
-    const by = BANNER_H + 22;
-    const bw = 110;
-    const bh = 54;
+    const bw = 120;
+    const bh = 120;
+    const bx = ax + r + gap + 40;
+    const by = BANNER_H - 10;
     ctx.beginPath();
-    ctx.roundRect(bx, by, bw, bh, 12);
+    ctx.roundRect(bx, by, bw, bh, 24);
     ctx.fillStyle = '#ffffff';
     ctx.fill();
     ctx.lineWidth = 1.5;
     ctx.strokeStyle = '#000000';
     ctx.stroke();
-    drawText(ctx, tagLabel, bx + bw / 2, by + bh / 2 + 1, bw - 20, 30);
+    drawText(ctx, tagLabel, bx + bw / 2, by + bh / 2 + 2, bw - 24, 52);
   }
 
-  // Pseudo en bas
-  drawText(ctx, user.displayName || user.username, W / 2, 480, W - 100, 60);
+  // Pseudo en bas à gauche
+  drawText(ctx, user.displayName || user.username, 50, 505, W - 100, 64, 'left');
 
   return new AttachmentBuilder(await canvas.encode('png'), { name: 'card.png' });
 }
@@ -332,7 +342,7 @@ client.on('guildMemberAdd', async (member) => {
         tagChannel,
         member.user,
         'BIENVENUE',
-        `${member} tu as reçu le rôle ${role} (${len} caractères) ${role}`,
+        `${member}\nBravo, tu as obtenu le rôle ${role}`,
         tagLabel,
         'profile'
       );
@@ -375,4 +385,3 @@ client.on('guildMemberUpdate', async (oldM, newM) => {
 });
 
 client.login(TOKEN);
-                           
