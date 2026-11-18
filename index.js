@@ -75,12 +75,17 @@ const COMMAND_TYPES = {
 
 // ---------- Bannières ----------
 function pickBannerFile() {
-  if (!fs.existsSync(BANNERS_DIR)) return null;
-  const files = fs
-    .readdirSync(BANNERS_DIR)
-    .filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
-  if (!files.length) return null;
-  return path.join(BANNERS_DIR, files[Math.floor(Math.random() * files.length)]);
+  if (fs.existsSync(BANNERS_DIR)) {
+    const files = fs
+      .readdirSync(BANNERS_DIR)
+      .filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+    if (files.length) {
+      return path.join(BANNERS_DIR, files[Math.floor(Math.random() * files.length)]);
+    }
+  }
+  // Ancien fonctionnement : une seule image banner.png à côté du fichier
+  if (fs.existsSync('./banner.png')) return './banner.png';
+  return null;
 }
 
 // Dessine l'image en "cover" (remplit la zone sans déformer, rogne ce qui dépasse)
@@ -311,6 +316,7 @@ async function sendCard(channel, user, title, content, tagLabel, layout = 'cente
 client.once('clientReady', async () => {
   await client.application.commands.set(commands);
   console.log(`Connecté en tant que ${client.user.tag}`);
+  console.log('Version : cartes v3 | commandes :', commands.map((c) => '/' + c.name).join(', '));
 });
 
 client.on('interactionCreate', async (i) => {
@@ -385,3 +391,4 @@ client.on('guildMemberUpdate', async (oldM, newM) => {
 });
 
 client.login(TOKEN);
+    
